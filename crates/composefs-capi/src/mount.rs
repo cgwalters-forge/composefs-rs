@@ -21,6 +21,7 @@ pub struct LcfsMountOptions {
 }
 
 const LCFS_MOUNT_FLAGS_REQUIRE_VERITY: u32 = 1 << 0;
+const LCFS_MOUNT_FLAGS_READONLY: u32 = 1 << 1;
 const LCFS_MOUNT_FLAGS_IDMAP: u32 = 1 << 3;
 const LCFS_MOUNT_FLAGS_TRY_VERITY: u32 = 1 << 4;
 const LCFS_MOUNT_FLAGS_MASK: u32 = (1 << 5) - 1;
@@ -232,6 +233,23 @@ pub unsafe extern "C" fn lcfs_mount_fd(
 
             if !options.is_null() {
                 let opts = &*options;
+                // validate_options() checked that both or neither are set.
+                if !opts.upperdir.is_null() {
+                    let dirs = open_dir(opts.upperdir, OFlags::PATH)
+                        .and_then(|upper| Ok((upper, open_dir(opts.workdir, OFlags::PATH)?)));
+                    match dirs {
+                        Ok((upper, work)) => {
+                            mount_options.set_overlay(upper, work);
+                        }
+                        Err(errno) => {
+                            set_errno(errno);
+                            return -1;
+                        }
+                    }
+                    // As in C, a mount with an upper layer is writable
+                    // unless asked otherwise.
+                    mount_options.set_read_write(opts.flags & LCFS_MOUNT_FLAGS_READONLY == 0);
+                }
                 if (opts.flags & LCFS_MOUNT_FLAGS_IDMAP) != 0 && opts.idmap_fd >= 0 {
                     let dup_idmap = libc::dup(opts.idmap_fd);
                     if dup_idmap < 0 {
