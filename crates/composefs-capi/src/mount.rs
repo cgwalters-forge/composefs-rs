@@ -6,6 +6,10 @@ use rustix::fs::{CWD, Mode, OFlags, open};
 
 use crate::errno::set_errno;
 
+/// `struct lcfs_mount_options_s` from lcfs-mount.h.
+///
+/// The entry points take it as `Option<&LcfsMountOptions>`: Rust guarantees
+/// that has the ABI of a nullable C pointer, with null as `None`.
 #[repr(C)]
 pub struct LcfsMountOptions {
     pub objdirs: *const *const c_char,
@@ -32,7 +36,7 @@ fn io_error_to_errno(e: &std::io::Error) -> c_int {
 pub unsafe extern "C" fn lcfs_mount_image(
     path: *const c_char,
     mountpoint: *const c_char,
-    options: *mut LcfsMountOptions,
+    options: Option<&LcfsMountOptions>,
 ) -> c_int {
     if path.is_null() || mountpoint.is_null() {
         set_errno(libc::EINVAL);
@@ -61,7 +65,7 @@ pub unsafe extern "C" fn lcfs_mount_image(
 pub unsafe extern "C" fn lcfs_mount_fd(
     fd: c_int,
     mountpoint: *const c_char,
-    options: *mut LcfsMountOptions,
+    options: Option<&LcfsMountOptions>,
 ) -> c_int {
     if fd < 0 || mountpoint.is_null() {
         set_errno(libc::EINVAL);
@@ -78,27 +82,23 @@ pub unsafe extern "C" fn lcfs_mount_fd(
         let image_fd = OwnedFd::from_raw_fd(dup_fd);
 
         let mut basedirs: Vec<CString> = Vec::new();
-        if !options.is_null() {
-            let opts = &*options;
-            if !opts.objdirs.is_null() && opts.n_objdirs > 0 {
-                for i in 0..opts.n_objdirs {
-                    let dir_ptr = *opts.objdirs.add(i);
-                    if !dir_ptr.is_null() {
-                        basedirs.push(CStr::from_ptr(dir_ptr).to_owned());
-                    }
+        if let Some(opts) = options
+            && !opts.objdirs.is_null()
+            && opts.n_objdirs > 0
+        {
+            for i in 0..opts.n_objdirs {
+                let dir_ptr = *opts.objdirs.add(i);
+                if !dir_ptr.is_null() {
+                    basedirs.push(CStr::from_ptr(dir_ptr).to_owned());
                 }
             }
         }
 
-        let verity = if !options.is_null() {
-            let opts = &*options;
-            if (opts.flags & LCFS_MOUNT_FLAGS_REQUIRE_VERITY) != 0 {
-                composefs::mount::VerityRequirement::Required
-            } else if (opts.flags & LCFS_MOUNT_FLAGS_TRY_VERITY) != 0 {
-                composefs::mount::VerityRequirement::Try
-            } else {
-                composefs::mount::VerityRequirement::Disabled
-            }
+        let flags = options.map_or(0, |opts| opts.flags);
+        let verity = if (flags & LCFS_MOUNT_FLAGS_REQUIRE_VERITY) != 0 {
+            composefs::mount::VerityRequirement::Required
+        } else if (flags & LCFS_MOUNT_FLAGS_TRY_VERITY) != 0 {
+            composefs::mount::VerityRequirement::Try
         } else {
             composefs::mount::VerityRequirement::Disabled
         };
@@ -122,8 +122,7 @@ pub unsafe extern "C" fn lcfs_mount_fd(
             let borrowed: Vec<_> = basedir_fds.iter().map(|fd| fd.as_fd()).collect();
             let mut mount_options = composefs::mount::MountOptions::default();
 
-            if !options.is_null() {
-                let opts = &*options;
+            if let Some(opts) = options {
                 if (opts.flags & LCFS_MOUNT_FLAGS_IDMAP) != 0 && opts.idmap_fd >= 0 {
                     let dup_idmap = libc::dup(opts.idmap_fd);
                     if dup_idmap < 0 {
