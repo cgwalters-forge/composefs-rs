@@ -77,14 +77,6 @@ pub unsafe extern "C" fn lcfs_mount_fd(
         }
         let image_fd = OwnedFd::from_raw_fd(dup_fd);
 
-        let erofs_fd = match composefs::mount::erofs_mount(image_fd) {
-            Ok(fd) => fd,
-            Err(e) => {
-                set_errno(io_error_to_errno(&e));
-                return -1;
-            }
-        };
-
         let mut basedirs: Vec<CString> = Vec::new();
         if !options.is_null() {
             let opts = &*options;
@@ -141,8 +133,9 @@ pub unsafe extern "C" fn lcfs_mount_fd(
                 }
             }
 
+            // composefs_fsmount() mounts the EROFS image itself.
             match composefs::mount::composefs_fsmount(
-                erofs_fd,
+                image_fd,
                 "composefs",
                 &borrowed,
                 verity,
@@ -160,6 +153,13 @@ pub unsafe extern "C" fn lcfs_mount_fd(
                 }
             }
         } else {
+            let erofs_fd = match composefs::mount::erofs_mount(image_fd) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    set_errno(io_error_to_errno(&e));
+                    return -1;
+                }
+            };
             if let Err(e) = composefs::mount::mount_at(&erofs_fd, CWD, mountpoint_cstr) {
                 set_errno(e.raw_os_error());
                 return -1;
