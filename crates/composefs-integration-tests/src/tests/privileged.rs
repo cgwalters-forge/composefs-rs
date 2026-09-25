@@ -58,14 +58,48 @@ pub fn require_privileged_with_memory(test_name: &str, memory: &str) -> Result<O
         )
     })?;
 
+    run_in_vm(test_name, &image, Some(memory))?;
+    Ok(Some(()))
+}
+
+/// Directory in which to keep the journal and console of each VM whose
+/// test fails, as `<dir>/<test>-<attempt>/`, e.g. for CI to upload.
+const VM_LOG_DIR_ENV: &str = "COMPOSEFS_VM_LOG_DIR";
+
+/// Run `test_name` inside a bcvk ephemeral VM booted from `image`.
+///
+/// When the VM dies or stops answering, ssh exits 255 with no other
+/// output, so if [`VM_LOG_DIR_ENV`] is set the VM's journal and console
+/// are captured and kept when the test fails.
+fn run_in_vm(test_name: &str, image: &str, memory: Option<&str>) -> Result<()> {
     let sh = Shell::new()?;
     let bcvk = std::env::var("BCVK_PATH").unwrap_or_else(|_| "bcvk".into());
+    let memory_args = memory.map(|m| ["--memory", m]).into_iter().flatten();
+
+    let log_dir = std::env::var_os(VM_LOG_DIR_ENV).map(|base| {
+        // Set by nextest; keeps a retry from overwriting the failed attempt's logs.
+        let attempt = std::env::var("NEXTEST_ATTEMPT").unwrap_or_else(|_| "1".into());
+        PathBuf::from(base).join(format!("{test_name}-{attempt}"))
+    });
+    let mut log_args = Vec::new();
+    if let Some(dir) = &log_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating VM log directory {}", dir.display()))?;
+        log_args.push("--log-dir".to_owned());
+        log_args.push(format!("journal,console={}", dir.display()));
+    }
+
     cmd!(
         sh,
-        "{bcvk} ephemeral run-ssh --memory {memory} {image} -- cfsctl-integration-tests --exact {test_name}"
+        "{bcvk} ephemeral run-ssh {memory_args...} {log_args...} {image} -- cfsctl-integration-tests --exact {test_name}"
     )
     .run()?;
-    Ok(Some(()))
+
+    if let Some(dir) = &log_dir {
+        // Best effort: only failures' logs are interesting.
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Ok(())
 }
 
 /// Check if user namespaces work (needed for podman unshare).
@@ -110,13 +144,7 @@ pub fn require_userns(test_name: &str) -> Result<Option<()>> {
         )
     })?;
 
-    let sh = Shell::new()?;
-    let bcvk = std::env::var("BCVK_PATH").unwrap_or_else(|_| "bcvk".into());
-    cmd!(
-        sh,
-        "{bcvk} ephemeral run-ssh {image} -- cfsctl-integration-tests --exact {test_name}"
-    )
-    .run()?;
+    run_in_vm(test_name, &image, None)?;
     Ok(Some(()))
 }
 

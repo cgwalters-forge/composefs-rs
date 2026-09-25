@@ -128,6 +128,7 @@ jobs:
     env:
       COMPOSEFS_BASE_IMAGE: ${{ matrix.base_image }}
       COMPOSEFS_CFSCTL_FEATURES: ${{ matrix.cfsctl_features }}
+      COMPOSEFS_VM_LOG_DIR: ${{ github.workspace }}/target/vm-logs
 
     steps:
       - uses: actions/checkout@v7
@@ -147,6 +148,16 @@ jobs:
 
       - name: Run integration tests (unprivileged + privileged via VM)
         run: just test-integration-vm
+
+      # Only failed VM runs leave logs behind, so upload whenever there
+      # are any, even if the job passed.
+      - name: Upload VM logs of failed privileged tests
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-logs-${{ matrix.name }}
+          path: target/vm-logs/
+          if-no-files-found: ignore
 
   examples:
     name: Example tests (${{ matrix.example.dir }}/${{ matrix.example.os }})
