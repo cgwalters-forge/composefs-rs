@@ -90,7 +90,7 @@ impl<ObjectID: FsVerityHashValue> DeltaDataSource for ComposeFsDataSource<Object
                 let fd = self
                     .source
                     .repo
-                    .open_object(&file.repo_object_id()?)
+                    .open_object(file.repo_object_id()?.as_ref())
                     .with_context(|| format!("Opening source object for {}", path.display()))?;
                 CurrentFile::External(File::from(fd))
             }

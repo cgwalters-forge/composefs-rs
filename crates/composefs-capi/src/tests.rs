@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::io::{Seek, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::ptr;
 
 use crate::node;
@@ -235,12 +235,11 @@ fn test_fsverity_from_fd_respects_offset() {
     use crate::fsverity;
 
     // Create an anonymous temp file via memfd
-    let name = CString::new("test-fsverity").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
-    assert!(fd >= 0, "memfd_create failed");
+    let fd = rustix::fs::memfd_create(c"test-fsverity", rustix::fs::MemfdFlags::empty())
+        .expect("memfd_create failed");
 
     // Write known content: "AAABBB"
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = std::fs::File::from(fd);
     file.write_all(b"AAABBB").unwrap();
 
     // Compute expected hash of just "BBB" (the tail after seeking past 3 bytes)
@@ -261,15 +260,11 @@ fn test_fsverity_from_fd_respects_offset() {
         let ret = fsverity::lcfs_compute_fsverity_from_fd(actual_digest.as_mut_ptr(), fd);
         assert_eq!(ret, 0);
     }
-    // Prevent File from closing the fd (we handed raw fd to FFI)
-    std::mem::forget(file);
 
     assert_eq!(
         actual_digest, expected_digest,
         "fsverity from fd at offset 3 must hash only the remaining bytes"
     );
-
-    unsafe { libc::close(fd) };
 }
 
 /// Bug 6: lcfs_write_to must reject version > LCFS_VERSION_MAX (1).
@@ -420,10 +415,9 @@ fn test_ostree_image_matches_c() {
     use std::os::unix::ffi::OsStrExt;
     use zerocopy::IntoBytes;
 
-    let name = CString::new("ostree-image").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
-    assert!(fd >= 0, "memfd_create failed");
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let fd = rustix::fs::memfd_create(c"ostree-image", rustix::fs::MemfdFlags::empty())
+        .expect("memfd_create failed");
+    let mut file = std::fs::File::from(fd);
     let ret = unsafe { write_ostree_image(file.as_raw_fd()) };
     assert_eq!(ret, 0, "write_ostree_image failed");
     file.rewind().unwrap();
