@@ -1,5 +1,5 @@
 //! Shared wire types and the `OciProxy` client trait for the
-//! `org.composefs.Oci` varlink interface.
+//! `io.cncf.composefs.Oci` varlink interface.
 //!
 //! These types are defined here (in `composefs-oci`) rather than
 //! `composefs-ctl` so that both the repo-side service (`CfsctlService` in
@@ -36,7 +36,7 @@ pub struct StorageLocator {
     pub layer_id: String,
 }
 
-/// Parameters for the `GetLayer` method of the `org.composefs.Oci` interface.
+/// Parameters for the `GetLayer` method of the `io.cncf.composefs.Oci` interface.
 ///
 /// Exactly one of `diff_id` or `storage` must be set:
 /// - **Repo service** (`CfsctlService`): reads `diff_id`, errors if `None`.
@@ -150,9 +150,9 @@ pub struct FinalizeImageReply {
 
 // ── OciError ──────────────────────────────────────────────────────────────────
 
-/// Errors returned by the `org.composefs.Oci` interface.
+/// Errors returned by the `io.cncf.composefs.Oci` interface.
 #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-#[zlink(interface = "org.composefs.Oci")]
+#[zlink(interface = "io.cncf.composefs.Oci")]
 pub enum OciError {
     /// The repository could not be found or opened at the configured path.
     RepoNotFound {
@@ -207,11 +207,11 @@ pub enum OciError {
 
 // ── OciProxy trait ────────────────────────────────────────────────────────────
 
-/// Typed client proxy for the `org.composefs.Oci` varlink interface.
+/// Typed client proxy for the `io.cncf.composefs.Oci` varlink interface.
 ///
 /// Both the composefs repo service and the containers-storage service expose
 /// this interface; this proxy trait can be used against either.
-#[zlink::proxy(interface = "org.composefs.Oci")]
+#[zlink::proxy(interface = "io.cncf.composefs.Oci")]
 pub trait OciProxy {
     /// Query capability tokens supported by the service.
     async fn get_info(&mut self) -> zlink::Result<Result<GetInfoReply, OciError>>;

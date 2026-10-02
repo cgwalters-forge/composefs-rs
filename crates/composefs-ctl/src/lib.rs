@@ -547,7 +547,7 @@ enum OciCommand {
     /// Serve the varlink RPC API on a Unix socket or systemd socket.
     ///
     /// Equivalent to `cfsctl varlink`: a single service answers both the
-    /// `org.composefs.Repository` and `org.composefs.Oci` interfaces on one
+    /// `io.cncf.composefs.Repository` and `io.cncf.composefs.Oci` interfaces on one
     /// socket. Kept for discoverability under the `oci` subcommand.
     Varlink {
         /// Unix socket path to listen on (omit when using systemd socket activation).
@@ -943,8 +943,8 @@ enum Command {
     },
     /// Serve the varlink RPC API on a Unix socket or systemd socket.
     ///
-    /// A single service answers both the `org.composefs.Repository` and (when
-    /// the `oci` feature is enabled) `org.composefs.Oci` interfaces on one
+    /// A single service answers both the `io.cncf.composefs.Repository` and (when
+    /// the `oci` feature is enabled) `io.cncf.composefs.Oci` interfaces on one
     /// socket.
     Varlink {
         /// Unix socket path to listen on (omit when using systemd socket activation).
@@ -1211,8 +1211,8 @@ pub async fn run_app(args: App) -> Result<()> {
 
     // The varlink service opens repositories on demand via `OpenRepository`
     // (handling both hash types), so it bypasses the generic repo-open dispatch
-    // below. A single `CfsctlService` answers both the `org.composefs.Repository`
-    // and (when the `oci` feature is enabled) `org.composefs.Oci` interfaces, so
+    // below. A single `CfsctlService` answers both the `io.cncf.composefs.Repository`
+    // and (when the `oci` feature is enabled) `io.cncf.composefs.Oci` interfaces, so
     // `cfsctl varlink` and `cfsctl oci varlink` serve the same combined service.
     if let Command::Varlink { ref address } = args.cmd {
         let service = crate::varlink::CfsctlService::from_app(&args);

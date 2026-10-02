@@ -3,9 +3,9 @@
 //! `cfsctl varlink` exposes a [varlink] RPC service over a Unix socket
 //! with two interfaces:
 //!
-//! - **`org.composefs.Repository`** — repository lifecycle, integrity
+//! - **`io.cncf.composefs.Repository`** — repository lifecycle, integrity
 //!   checks, garbage collection, and mounting
-//! - **`org.composefs.Oci`** — OCI container image operations (listing,
+//! - **`io.cncf.composefs.Oci`** — OCI container image operations (listing,
 //!   pulling, inspecting, tagging, mounting)
 //!
 //! This API is language-agnostic and usable from any varlink client.
@@ -34,18 +34,18 @@
 //!
 //! # Full IDL for the Repository interface
 //! varlinkctl introspect /run/composefs/composefs.sock \
-//!     org.composefs.Repository
+//!     io.cncf.composefs.Repository
 //!
 //! # Full IDL for the OCI interface
 //! varlinkctl introspect /run/composefs/composefs.sock \
-//!     org.composefs.Oci
+//!     io.cncf.composefs.Oci
 //! ```
 //!
 //! For `exec:`-style transports (no long-running socket), `varlinkctl`
 //! can launch `cfsctl` as a subprocess:
 //!
 //! ```sh
-//! varlinkctl introspect exec:cfsctl\ varlink org.composefs.Repository
+//! varlinkctl introspect exec:cfsctl\ varlink io.cncf.composefs.Repository
 //! ```
 //!
 //! [`varlinkctl`]: https://www.freedesktop.org/software/systemd/man/latest/varlinkctl.html
@@ -67,18 +67,18 @@
 //! ```sh
 //! # Open the system repository (/sysroot/composefs)
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.OpenRepository '{"system": true}'
+//!     io.cncf.composefs.Repository.OpenRepository '{"system": true}'
 //! # → {"handle": 1}
 //!
 //! # Open at a specific path
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.OpenRepository \
+//!     io.cncf.composefs.Repository.OpenRepository \
 //!     '{"path": "/srv/composefs"}'
 //! # → {"handle": 2}
 //!
 //! # Release a handle when done
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.CloseRepository '{"handle": 1}'
+//!     io.cncf.composefs.Repository.CloseRepository '{"handle": 1}'
 //! ```
 //!
 //! ### Check repository integrity
@@ -86,12 +86,12 @@
 //! ```sh
 //! # Full check (verifies fs-verity on every object)
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.Fsck '{"handle": 1}'
+//!     io.cncf.composefs.Repository.Fsck '{"handle": 1}'
 //! # → {"ok": true, "has_metadata": true, "objects_checked": 1542, ...}
 //!
 //! # Fast metadata-only check (skips per-object verification)
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.Fsck \
+//!     io.cncf.composefs.Repository.Fsck \
 //!     '{"handle": 1, "metadata_only": true}'
 //! ```
 //!
@@ -99,13 +99,13 @@
 //!
 //! ```sh
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Oci.ListImages '{"handle": 1}'
+//!     io.cncf.composefs.Oci.ListImages '{"handle": 1}'
 //! # → {"images": [{"name": "myimage:latest",
 //! #     "manifest_digest": "sha256:abc...", ...}, ...]}
 //!
 //! # Pull with streaming progress
 //! varlinkctl call --more /run/composefs/composefs.sock \
-//!     org.composefs.Oci.Pull '{
+//!     io.cncf.composefs.Oci.Pull '{
 //!       "handle": 1,
 //!       "image": "quay.io/fedora/fedora:latest",
 //!       "local_fetch": "decompressed",
@@ -119,19 +119,19 @@
 //!
 //! ```sh
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Oci.Inspect \
+//!     io.cncf.composefs.Oci.Inspect \
 //!     '{"handle": 1, "image": "myimage:latest"}'
 //! # → {"manifest": "{...}", "config": "{...}", ...}
 //!
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Oci.Tag '{
+//!     io.cncf.composefs.Oci.Tag '{
 //!       "handle": 1,
 //!       "manifest_digest": "sha256:abc123...",
 //!       "name": "myimage:v2"
 //!     }'
 //!
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Oci.Untag \
+//!     io.cncf.composefs.Oci.Untag \
 //!     '{"handle": 1, "name": "myimage:old"}'
 //! ```
 //!
@@ -140,12 +140,12 @@
 //! ```sh
 //! # Dry run
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.Gc \
+//!     io.cncf.composefs.Repository.Gc \
 //!     '{"handle": 1, "dry_run": true, "roots": []}'
 //!
 //! # Collect for real
 //! varlinkctl call /run/composefs/composefs.sock \
-//!     org.composefs.Repository.Gc \
+//!     io.cncf.composefs.Repository.Gc \
 //!     '{"handle": 1, "dry_run": false, "roots": []}'
 //! ```
 //!
