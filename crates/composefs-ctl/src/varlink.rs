@@ -2816,7 +2816,8 @@ pub mod oci_transfer {
     pub use composefs_oci::varlink_types::{
         FEATURE_READ_ONLY, FEATURE_SOURCE_CONTAINERS_STORAGE, FEATURE_SPLITDIRFDSTREAM_V0,
         FinalizeImageReply, GetInfoReply, GetLayerParams, GetLayerReply, HasLayerReply, LayerRef,
-        OCI_TRANSFER_INTERFACE, OciTransferError, OciTransferProxy, PutLayerReply, StorageLocator,
+        OCI_TRANSFER_IDL, OCI_TRANSFER_INTERFACE, OciTransferError, OciTransferProxy,
+        PutLayerReply, StorageLocator,
     };
 }
 
@@ -3665,5 +3666,53 @@ mod layer_sync_tests {
             erofs.is_some(),
             "EROFS image must exist after finalize_image"
         );
+    }
+}
+
+#[cfg(all(test, feature = "oci"))]
+mod idl_tests {
+    //! The served `io.cncf.composefs.OciTransfer` IDL must match the
+    //! checked-in description that every implementation is tested against.
+
+    use zlink::idl::Interface;
+    use zlink::varlink_service::{InterfaceDescription, Proxy as _};
+
+    use super::oci_transfer::{OCI_TRANSFER_IDL, OCI_TRANSFER_INTERFACE};
+    use super::{CfsctlService, spawn_in_process};
+
+    async fn describe(
+        conn: &mut zlink::tokio::unix::Connection,
+        name: &str,
+    ) -> InterfaceDescription<'static> {
+        conn.get_interface_description(name)
+            .await
+            .expect("transport error")
+            .unwrap_or_else(|e| panic!("GetInterfaceDescription({name}): {e:?}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oci_transfer_idl_matches_checked_in() {
+        let expected = Interface::try_from(OCI_TRANSFER_IDL).expect("parsing checked-in IDL");
+        let (mut conn, _server) = spawn_in_process(CfsctlService::new()).unwrap();
+
+        let desc = describe(&mut conn, OCI_TRANSFER_INTERFACE).await;
+        let served = desc.parse().expect("parsing served IDL");
+        // Interface equality ignores comments, so only the contract counts.
+        assert!(
+            served == expected,
+            "served {OCI_TRANSFER_INTERFACE} IDL differs from the checked-in \
+             one in composefs-oci; update it if the change is intended:\n{served}"
+        );
+
+        // The store-to-store methods live only in OciTransfer.
+        let oci_desc = describe(&mut conn, "io.cncf.composefs.Oci").await;
+        let oci = oci_desc.parse().expect("parsing served Oci IDL");
+        for m in expected.methods() {
+            assert!(
+                oci.methods().all(|o| o.name() != m.name()),
+                "io.cncf.composefs.Oci still has {}",
+                m.name()
+            );
+        }
     }
 }

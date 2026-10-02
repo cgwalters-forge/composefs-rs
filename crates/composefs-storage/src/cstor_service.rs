@@ -1313,6 +1313,34 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// The served `io.cncf.composefs.OciTransfer` IDL must match the
+    /// checked-in one in composefs-oci, which cfsctl's repository service is
+    /// tested against too: every store serves the same interface.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cstor_transfer_idl_matches_checked_in() {
+        use zlink::varlink_service::Proxy as _;
+
+        const IDL: &str =
+            include_str!("../../composefs-oci/src/io.cncf.composefs.OciTransfer.varlink");
+        let expected = zlink::idl::Interface::try_from(IDL).unwrap();
+
+        let (mut client, server) = spawn_in_process(CstorLayerService).unwrap();
+        let desc = client
+            .get_interface_description("io.cncf.composefs.OciTransfer")
+            .await
+            .unwrap()
+            .unwrap();
+        let served = desc.parse().unwrap();
+        // Interface equality ignores comments, so only the contract counts.
+        assert!(
+            served == expected,
+            "served IDL differs from composefs-oci's checked-in one:\n{served}"
+        );
+
+        drop(client);
+        server.shutdown().await;
+    }
+
     /// Regression test: the self-reaping producer must not deadlock.
     #[test]
     fn test_in_process_teardown_does_not_deadlock() {

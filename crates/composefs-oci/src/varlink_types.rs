@@ -8,11 +8,15 @@
 //! Put methods (`PutLayer`, `FinalizeImage`) with
 //! [`OciTransferError::ReadOnly`].
 //!
+//! The interface's IDL is checked in as [`OCI_TRANSFER_IDL`]. It is the one
+//! description every implementation, including the Go server in
+//! container-libs, is tested against; the comparison ignores comments.
+//!
 //! These types live here (in `composefs-oci`) rather than `composefs-ctl` so
 //! that the repository service and the containers-storage client in
 //! `crate::cstor` share them. composefs-storage can't depend on this crate
 //! (that would be a cycle), so `CstorLayerService` keeps wire-compatible
-//! copies.
+//! copies, which the IDL test keeps in sync.
 //!
 //! # Feature gate
 //!
@@ -25,6 +29,9 @@ use serde::{Deserialize, Serialize};
 
 /// The varlink interface name.
 pub const OCI_TRANSFER_INTERFACE: &str = "io.cncf.composefs.OciTransfer";
+
+/// The checked-in IDL of [`OCI_TRANSFER_INTERFACE`].
+pub const OCI_TRANSFER_IDL: &str = include_str!("io.cncf.composefs.OciTransfer.varlink");
 
 /// `GetInfo` feature token: layers are streamed as `splitdirfdstream`, with
 /// the fd layout described on [`GetLayerReply`].

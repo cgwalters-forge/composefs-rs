@@ -39,6 +39,8 @@ layer-transfer = ["dep:zlink", "dep:composefs-splitdirfdstream", "dep:tokio", "d
 
 [dev-dependencies]
 tempfile = { version = "3.8", default-features = false }
+# Parses the served IDL in the OciTransfer snapshot test.
+zlink = { workspace = true, features = ["idl-parse"] }
 tokio = { version = "1.40", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "sync"] }
 
 [lints]
