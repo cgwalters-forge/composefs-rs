@@ -4,7 +4,7 @@
 //! containers-storage content that has restrictive permissions. It works by
 //! spawning a helper process inside a user namespace (via `podman unshare`)
 //! that can read any file, and communicating with it via the zlink
-//! `io.cncf.composefs.Oci` service (`CstorLayerService`) over a Unix socket.
+//! `io.cncf.composefs.OciTransfer` service (`CstorLayerService`) over a Unix socket.
 //!
 //! # Why This Is Needed
 //!
@@ -31,7 +31,7 @@
 //! │       │      (child's stdin=socket) │
 //! │       │                             │
 //! │  proxy.connection()  ──────────────►│
-//! │       │   (OciProxy/CstorLayerSvc)  │
+//! │       │   (OciTransferProxy/Cstor)  │
 //! └─────────────────────────────────────┘
 //! ```
 //!
@@ -89,7 +89,7 @@ pub enum HelperError {
 }
 
 /// Check if this process was spawned as a userns helper and serve the
-/// `io.cncf.composefs.Oci` (`CstorLayerService`) zlink service if so.
+/// `io.cncf.composefs.OciTransfer` (`CstorLayerService`) zlink service if so.
 ///
 /// This function **must** be called early in `main()`, before any other
 /// `composefs_storage` operations.  If the `__CSTORAGE_USERNS_HELPER`
@@ -98,7 +98,7 @@ pub enum HelperError {
 /// 1. Set a parent-death signal so the helper exits when the parent dies.
 /// 2. Duplicate `stdin` into an owned [`StdUnixStream`].
 /// 3. Call [`crate::cstor_service::serve_on_socket_blocking`] to serve the
-///    `io.cncf.composefs.Oci` zlink service until the parent closes the connection.
+///    `io.cncf.composefs.OciTransfer` zlink service until the parent closes the connection.
 /// 4. Exit the process (0 on success, 1 on error).
 ///
 /// If the environment variable is **not** set, this function returns
@@ -153,7 +153,7 @@ pub fn init_if_helper() {
 /// When the caller cannot bypass file permissions, `StorageProxy::spawn()`
 /// starts a helper process inside a user namespace using `podman unshare` and
 /// returns a connected [`zlink::tokio::unix::Connection`] the caller can use with the
-/// [`composefs_oci::varlink_types::OciProxy`] trait to stream layers.
+/// [`composefs_oci::varlink_types::OciTransferProxy`] trait to stream layers.
 ///
 /// # Dependency on `podman`
 ///
@@ -249,7 +249,7 @@ impl StorageProxy {
 
     /// Return a mutable reference to the underlying zlink connection.
     ///
-    /// Callers use this with the `OciProxy` trait (from
+    /// Callers use this with the `OciTransferProxy` trait (from
     /// `composefs_oci::varlink_types`) to drive `GetLayer` calls over the
     /// helper connection.
     pub fn connection(&mut self) -> &mut zlink::tokio::unix::Connection {
