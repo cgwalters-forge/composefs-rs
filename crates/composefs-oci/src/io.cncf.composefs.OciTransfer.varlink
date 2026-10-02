@@ -1,0 +1,81 @@
+# Moving OCI images and layers between stores.
+#
+# Every store serves this same interface: a composefs repository (cfsctl),
+# the containers-storage helper, and the Go server in container-libs. A
+# read-only store advertises the "read-only" feature token in GetInfo and
+# answers PutLayer and FinalizeImage with ReadOnly.
+#
+# This file is the reference description. Each implementation is tested
+# against it with comments ignored, so only the method, type and error
+# shapes are binding; the comments here document the contract.
+interface io.cncf.composefs.OciTransfer
+
+# Capability tokens: "splitdirfdstream-v0" (the GetLayer fd layout below),
+# "read-only", "source-containers-storage". Clients ignore unknown tokens.
+method GetInfo() -> (features: []string)
+
+# Whether the layer with this diff-id is present, and its splitstream's
+# fs-verity digest (hex) if so.
+method HasLayer(handle: int, diff_id: string) -> (present: bool, layer_verity: ?string)
+
+# Stream a layer as a splitdirfdstream. Call with `more`: the fds of all
+# reply frames, concatenated in order, form
+#   [ data pipe | dir_count dirfd slots | lifetime fds ]
+# The stream's dirfd indices are the only mapping into the slots. Keep the
+# lifetime fds open until done reading, then close them. Without `more`,
+# everything comes in one frame or the call fails with FdLimitExceeded.
+#
+# A composefs repository reads params.diff_id; containers-storage reads
+# params.storage.
+method GetLayer(
+  handle: int,
+  params: (
+    diff_id: ?string,
+    storage: ?(storage_path: string, layer_id: string),
+    # The consumer can bypass file DAC (root or CAP_DAC_OVERRIDE), so the
+    # server may pass non-world-readable files by reference.
+    consumer_has_cap_dac_override: bool
+  )
+) -> (dir_count: int)
+
+# Import a layer sent as a splitdirfdstream: fds[0] is the data pipe,
+# fds[1..] the directories its dirfd indices refer to. Nothing is committed
+# unless the content hashes to diff_id (else DiffIdMismatch). Idempotent.
+method PutLayer(handle: int, diff_id: string, zerocopy: bool) -> (
+  layer_verity: string,
+  already_present: bool,
+  objects_reflinked: int,
+  objects_hardlinked: int,
+  objects_copied: int,
+  objects_already_present: int
+)
+
+# Write the manifest and config once every layer is present, and tag the
+# image if a name is given. Layers are in manifest order, each with the
+# layer_verity PutLayer returned. Idempotent.
+method FinalizeImage(
+  handle: int,
+  manifest_json: string,
+  config_json: string,
+  layers: [](diff_id: string, layer_verity: string),
+  name: ?string
+) -> (
+  manifest_digest: string,
+  manifest_verity: string,
+  config_digest: string,
+  config_verity: string
+)
+
+error RepoNotFound (message: string)
+error InvalidHandle (handle: int)
+error InternalError (message: string)
+error NoSuchLayer (diff_id: string)
+error InvalidDigest (message: string)
+# The received content didn't hash to the declared diff-id; nothing was
+# committed.
+error DiffIdMismatch (expected: string, actual: string)
+error InvalidRequest (message: string)
+# Too many fds for one frame; retry with `more`.
+error FdLimitExceeded (fd_count: int, max_per_frame: int)
+# The store is read-only.
+error ReadOnly ()
