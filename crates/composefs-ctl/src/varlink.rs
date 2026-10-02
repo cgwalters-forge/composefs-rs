@@ -1,7 +1,7 @@
 //! Varlink RPC service for `cfsctl`.
 //!
 //! Exposes a subset of repository operations over a Unix-socket varlink
-//! interface (`org.composefs.Repository`) so that integration tests and
+//! interface (`io.cncf.composefs.Repository`) so that integration tests and
 //! external callers can consume structured replies instead of scraping the
 //! human-oriented CLI output.
 //!
@@ -105,9 +105,9 @@ pub struct ImageObjectsReply {
     pub object_ids: Vec<String>,
 }
 
-/// Errors that may be returned by the `org.composefs.Repository` interface.
+/// Errors that may be returned by the `io.cncf.composefs.Repository` interface.
 #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-#[zlink(interface = "org.composefs.Repository")]
+#[zlink(interface = "io.cncf.composefs.Repository")]
 pub enum RepositoryError {
     /// The repository could not be found or opened at the configured path.
     RepoNotFound {
@@ -270,8 +270,8 @@ impl Default for OpenOptions {
     }
 }
 
-/// Varlink service implementation backing the `org.composefs.Repository` (and,
-/// with the `oci` feature, `org.composefs.Oci`) interfaces.
+/// Varlink service implementation backing the `io.cncf.composefs.Repository` (and,
+/// with the `oci` feature, `io.cncf.composefs.Oci`) interfaces.
 ///
 /// Holds a table of opened repositories keyed by opaque handle. The zlink
 /// server serializes calls to a single service, so the table is a plain
@@ -361,7 +361,7 @@ impl CfsctlService {
     /// Look up an open repository by handle for the OCI interface.
     ///
     /// Like [`Self::lookup_repo`] but reports the OCI-interface error so the
-    /// wire error name is `org.composefs.Oci.InvalidHandle`.
+    /// wire error name is `io.cncf.composefs.Oci.InvalidHandle`.
     #[cfg(feature = "oci")]
     fn lookup_oci(&self, handle: u64) -> std::result::Result<OpenRepo, oci::OciError> {
         self.repos
@@ -747,7 +747,7 @@ pub(crate) fn run_ensure_repository(
     Ok(status)
 }
 
-/// OCI helper functions backing the `org.composefs.Oci` interface, gated behind
+/// OCI helper functions backing the `io.cncf.composefs.Oci` interface, gated behind
 /// the `oci` feature.
 #[cfg(feature = "oci")]
 async fn run_list_images<ObjectID: FsVerityHashValue>(
@@ -913,13 +913,13 @@ async fn run_compute_id<ObjectID: FsVerityHashValue>(
 // cannot cfg-gate individual methods (it doesn't propagate `#[cfg]`), and the
 // dispatch enum derives its variants from wire method names (so both
 // interfaces must live in ONE impl block). So when the `oci` feature is on we
-// emit a single impl that hosts BOTH `org.composefs.Repository` and
-// `org.composefs.Oci`; otherwise we emit a Repository-only impl.
+// emit a single impl that hosts BOTH `io.cncf.composefs.Repository` and
+// `io.cncf.composefs.Oci`; otherwise we emit a Repository-only impl.
 //
 // The interface attribute on each method is "sticky": once a method sets
-// `interface = "org.composefs.Oci"` the macro keeps using it for subsequent
+// `interface = "io.cncf.composefs.Oci"` the macro keeps using it for subsequent
 // methods until changed. The Repository methods come first and inherit the
-// seeded `org.composefs.Repository` interface.
+// seeded `io.cncf.composefs.Repository` interface.
 #[cfg(not(feature = "oci"))]
 mod service_impl {
     #![allow(missing_docs)]
@@ -933,7 +933,7 @@ mod service_impl {
     use composefs::fsverity::{Sha256HashValue, Sha512HashValue};
 
     #[zlink::service(
-        interface = "org.composefs.Repository",
+        interface = "io.cncf.composefs.Repository",
         vendor = "org.composefs",
         product = "cfsctl",
         version = env!("CARGO_PKG_VERSION"),
@@ -1099,8 +1099,8 @@ mod service_impl {
     }
 }
 
-// Combined variant: hosts BOTH the `org.composefs.Repository` and
-// `org.composefs.Oci` interfaces from a single impl block on `CfsctlService`,
+// Combined variant: hosts BOTH the `io.cncf.composefs.Repository` and
+// `io.cncf.composefs.Oci` interfaces from a single impl block on `CfsctlService`,
 // so one service answers both interfaces on one socket. See the comment above
 // for why this can't be cfg-gated method-by-method.
 #[cfg(feature = "oci")]
@@ -1128,14 +1128,14 @@ mod service_impl {
     use composefs_splitdirfdstream::seed_from_id;
 
     #[zlink::service(
-        interface = "org.composefs.Repository",
+        interface = "io.cncf.composefs.Repository",
         vendor = "org.composefs",
         product = "cfsctl",
         version = env!("CARGO_PKG_VERSION"),
         url = "https://github.com/composefs/composefs-rs"
     )]
     impl<Sock> CfsctlService {
-        // --- org.composefs.Repository (inherits the seeded interface) ---
+        // --- io.cncf.composefs.Repository (inherits the seeded interface) ---
 
         /// Initialize a new repository at the given path, or verify that an
         /// existing one matches the requested algorithm (idempotent).
@@ -1294,9 +1294,9 @@ mod service_impl {
             }
         }
 
-        // --- org.composefs.Oci ---
+        // --- io.cncf.composefs.Oci ---
         //
-        // The first OCI method sets `interface = "org.composefs.Oci"`; the
+        // The first OCI method sets `interface = "io.cncf.composefs.Oci"`; the
         // macro then keeps that interface sticky for subsequent methods. Each
         // OCI method is still annotated explicitly for clarity.
 
@@ -1304,7 +1304,7 @@ mod service_impl {
         ///
         /// When `filter` is given, only images whose name contains that
         /// substring are returned.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn list_images(
             &self,
             handle: u64,
@@ -1322,7 +1322,7 @@ mod service_impl {
         /// Renamed on the wire to `Check` so it does not collide with the
         /// repository-level `Fsck` method (the dispatch enum keys on the wire
         /// method name, which must be globally unique across both interfaces).
-        #[zlink(interface = "org.composefs.Oci", rename = "Check")]
+        #[zlink(interface = "io.cncf.composefs.Oci", rename = "Check")]
         async fn oci_fsck(
             &self,
             handle: u64,
@@ -1335,7 +1335,7 @@ mod service_impl {
         }
 
         /// Inspect a single OCI image.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn inspect(
             &self,
             handle: u64,
@@ -1348,7 +1348,7 @@ mod service_impl {
         }
 
         /// Tag a manifest digest with a name.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn tag(
             &self,
             handle: u64,
@@ -1366,7 +1366,7 @@ mod service_impl {
         }
 
         /// Remove a tag.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn untag(&self, handle: u64, name: String) -> std::result::Result<(), OciError> {
             match self.lookup_oci(handle)? {
                 OpenRepo::Sha256(ref r) => run_untag::<Sha256HashValue>(r, name).await,
@@ -1375,7 +1375,7 @@ mod service_impl {
         }
 
         /// Compute the composefs image ID for an OCI image.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn compute_id(
             &self,
             handle: u64,
@@ -1408,7 +1408,7 @@ mod service_impl {
         /// needed (e.g. a UKI embedding a digest produced by an older
         /// composefs-rs release with different defaults, against a
         /// repository whose format version is now fixed).
-        #[zlink(interface = "org.composefs.Oci", more)]
+        #[zlink(interface = "io.cncf.composefs.Oci", more)]
         #[allow(clippy::too_many_arguments)]
         async fn pull(
             &self,
@@ -1468,7 +1468,7 @@ mod service_impl {
         /// EROFS image (or boot variant if `bootable` is true), and creates
         /// a composefs mount. If `options.overlay` is true, the fd array
         /// must contain upperdir and workdir fds.
-        #[zlink(interface = "org.composefs.Oci", return_fds)]
+        #[zlink(interface = "io.cncf.composefs.Oci", return_fds)]
         async fn oci_mount(
             &self,
             handle: u64,
@@ -1495,7 +1495,7 @@ mod service_impl {
             }
         }
 
-        // --- org.composefs.Oci (layer-sync methods) ---
+        // --- io.cncf.composefs.Oci (layer-sync methods) ---
         //
         // These methods were previously under org.composefs.LayerSync but have
         // been folded into the Oci interface. Each carries an explicit `interface`
@@ -1504,7 +1504,7 @@ mod service_impl {
         /// Return the capability tokens supported by this service.
         ///
         /// Currently advertises `"splitdirfdstream-v0"`.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn get_info(&self) -> std::result::Result<GetInfoReply, OciError> {
             Ok(GetInfoReply {
                 features: vec!["splitdirfdstream-v0".into()],
@@ -1515,7 +1515,7 @@ mod service_impl {
         ///
         /// Returns `present = true` and the hex verity if found; `present =
         /// false` and `layer_verity = None` if not.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn has_layer(
             &self,
             handle: u64,
@@ -1574,7 +1574,7 @@ mod service_impl {
         /// The producer runs on `spawn_blocking` so the async task is never blocked.
         /// For the repo case there is no external lock to release, so `keepalive_read`
         /// is moved into the producer closure and dropped when the producer finishes.
-        #[zlink(interface = "org.composefs.Oci", more, return_fds)]
+        #[zlink(interface = "io.cncf.composefs.Oci", more, return_fds)]
         async fn get_layer(
             &self,
             more: bool,
@@ -1702,7 +1702,7 @@ mod service_impl {
         ///
         /// The server always drains the pipe to avoid wedging the client's writer
         /// even if the layer is already present — the import is idempotent.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn put_layer(
             &self,
             handle: u64,
@@ -1828,7 +1828,7 @@ mod service_impl {
         ///
         /// Returns the digest and verity strings for both the manifest and config
         /// splitstreams.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn finalize_image(
             &self,
             handle: u64,
@@ -2075,7 +2075,7 @@ where
     serve_on_listener(service, listener).await
 }
 
-/// Varlink support for the OCI interface (`org.composefs.Oci`).
+/// Varlink support for the OCI interface (`io.cncf.composefs.Oci`).
 ///
 /// Gated behind the `oci` feature; collected in one module so the feature
 /// gate lives in a single place rather than on every item.
@@ -2739,9 +2739,9 @@ pub mod oci {
         Box::pin(stream)
     }
 
-    /// Errors that may be returned by the `org.composefs.Oci` interface.
+    /// Errors that may be returned by the `io.cncf.composefs.Oci` interface.
     #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-    #[zlink(interface = "org.composefs.Oci")]
+    #[zlink(interface = "io.cncf.composefs.Oci")]
     pub enum OciError {
         /// The repository could not be found or opened at the configured path.
         RepoNotFound {
@@ -2809,11 +2809,11 @@ pub mod oci {
     }
 }
 
-/// Reply types for the layer-sync methods of the `org.composefs.Oci` interface,
+/// Reply types for the layer-sync methods of the `io.cncf.composefs.Oci` interface,
 /// gated behind the `oci` feature (they depend on [`composefs_oci::layer_sync`]).
 ///
 /// The four layer-sync methods (`GetInfo`, `HasLayer`, `GetLayer`, `PutLayer`)
-/// are part of `org.composefs.Oci`; this module merely collects their reply
+/// are part of `io.cncf.composefs.Oci`; this module merely collects their reply
 /// structs to keep them separate from the rest of the OCI wire types.
 #[cfg(feature = "oci")]
 pub mod layer_sync {
@@ -2959,8 +2959,8 @@ pub mod proxy {
     #[cfg(feature = "oci")]
     use zlink::futures_util::Stream;
 
-    /// Typed client for the `org.composefs.Repository` interface.
-    #[zlink::proxy(interface = "org.composefs.Repository")]
+    /// Typed client for the `io.cncf.composefs.Repository` interface.
+    #[zlink::proxy(interface = "io.cncf.composefs.Repository")]
     pub trait RepositoryProxy {
         /// Initialize a new repository (or verify an existing one).
         async fn init_repository(
@@ -3015,9 +3015,9 @@ pub mod proxy {
         ) -> zlink::Result<Result<ImageObjectsReply, RepositoryError>>;
     }
 
-    /// Typed client for the `org.composefs.Oci` interface.
+    /// Typed client for the `io.cncf.composefs.Oci` interface.
     #[cfg(feature = "oci")]
-    #[zlink::proxy(interface = "org.composefs.Oci")]
+    #[zlink::proxy(interface = "io.cncf.composefs.Oci")]
     #[allow(clippy::too_many_arguments)]
     pub trait OciProxy {
         /// List tagged OCI images.
@@ -3202,7 +3202,7 @@ pub(crate) fn spawn_in_process(
 #[cfg(all(test, feature = "oci"))]
 mod layer_sync_tests {
     //! In-process round-trip tests for the layer-sync methods of the
-    //! `org.composefs.Oci` interface.
+    //! `io.cncf.composefs.Oci` interface.
     //!
     //! These mirror the in-process transport test in
     //! `composefs-storage`'s `cstor_service.rs`.

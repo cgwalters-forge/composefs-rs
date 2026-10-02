@@ -1,6 +1,6 @@
-//! Stateless `org.composefs.Oci` service backed by containers-storage.
+//! Stateless `io.cncf.composefs.Oci` service backed by containers-storage.
 //!
-//! Exposes `GetInfo` and `GetLayer` from the `org.composefs.Oci` varlink
+//! Exposes `GetInfo` and `GetLayer` from the `io.cncf.composefs.Oci` varlink
 //! interface, using the `containers-storage` layer store as the source.
 #![allow(missing_docs)]
 //!
@@ -102,9 +102,9 @@ pub struct GetLayerReply {
     pub dir_count: u32,
 }
 
-/// Errors from the `org.composefs.Oci` interface (cstor service subset).
+/// Errors from the `io.cncf.composefs.Oci` interface (cstor service subset).
 #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-#[zlink(interface = "org.composefs.Oci")]
+#[zlink(interface = "io.cncf.composefs.Oci")]
 pub enum CstorOciError {
     /// The repository could not be found or opened.
     RepoNotFound { message: String },
@@ -128,7 +128,7 @@ pub enum CstorOciError {
 
 // ── CstorLayerService ─────────────────────────────────────────────────────────
 
-/// Stateless service implementing the `org.composefs.Oci` interface, backed
+/// Stateless service implementing the `io.cncf.composefs.Oci` interface, backed
 /// by a containers-storage layer store.
 ///
 /// Only `GetInfo` and `GetLayer` are implemented; all other methods return
@@ -295,7 +295,7 @@ mod service_impl {
     };
 
     #[zlink::service(
-        interface = "org.composefs.Oci",
+        interface = "io.cncf.composefs.Oci",
         vendor = "org.composefs",
         product = "composefs-storage",
         version = env!("CARGO_PKG_VERSION"),
@@ -997,8 +997,8 @@ mod tests {
 
     // ── C2/C3: CstorLayerService in-process GetLayer round-trip ─────────────
 
-    /// Proxy trait for the org.composefs.Oci interface (cstor client side).
-    #[zlink::proxy(interface = "org.composefs.Oci")]
+    /// Proxy trait for the io.cncf.composefs.Oci interface (cstor client side).
+    #[zlink::proxy(interface = "io.cncf.composefs.Oci")]
     trait CstorOciProxy {
         async fn get_info(
             &mut self,
