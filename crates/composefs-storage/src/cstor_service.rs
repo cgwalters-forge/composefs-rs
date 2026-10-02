@@ -1,7 +1,9 @@
-//! Stateless `io.cncf.composefs.Oci` service backed by containers-storage.
+//! Stateless `io.cncf.composefs.OciTransfer` service backed by containers-storage.
 //!
-//! Exposes `GetInfo` and `GetLayer` from the `io.cncf.composefs.Oci` varlink
-//! interface, using the `containers-storage` layer store as the source.
+//! Serves the same `io.cncf.composefs.OciTransfer` varlink interface as a
+//! composefs repository, using the `containers-storage` layer store as the
+//! source. The store is read-only here: `GetInfo` advertises `read-only`,
+//! `GetLayer` streams layers, and the Put methods return `ReadOnly`.
 #![allow(missing_docs)]
 //!
 //! # Design
@@ -95,6 +97,17 @@ pub struct GetInfoReply {
     pub features: Vec<String>,
 }
 
+/// Reply from `HasLayer`.
+///
+/// Wire-format counterpart of `composefs_oci::varlink_types::HasLayerReply`.
+#[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
+pub struct HasLayerReply {
+    /// Whether the layer is present.
+    pub present: bool,
+    /// Hex-encoded fs-verity hash of the layer splitstream, if present.
+    pub layer_verity: Option<String>,
+}
+
 /// Reply from `GetLayer`.
 #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
 pub struct GetLayerReply {
@@ -102,16 +115,67 @@ pub struct GetLayerReply {
     pub dir_count: u32,
 }
 
-/// Errors from the `io.cncf.composefs.Oci` interface (cstor service subset).
+/// Reply from `PutLayer` (never sent: this store is read-only).
+///
+/// Wire-format counterpart of `composefs_oci::varlink_types::PutLayerReply`.
+#[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
+pub struct PutLayerReply {
+    /// Hex-encoded fs-verity hash of the committed layer splitstream.
+    pub layer_verity: String,
+    /// `true` if the layer was already present before this call.
+    pub already_present: bool,
+    /// Number of objects reflinked into the destination.
+    #[serde(default)]
+    pub objects_reflinked: u64,
+    /// Number of objects hardlinked into the destination.
+    #[serde(default)]
+    pub objects_hardlinked: u64,
+    /// Number of objects byte-copied into the destination.
+    #[serde(default)]
+    pub objects_copied: u64,
+    /// Number of objects already present in the destination.
+    #[serde(default)]
+    pub objects_already_present: u64,
+}
+
+/// A (diff_id, layer_verity) pair passed to `FinalizeImage`.
+///
+/// Wire-format counterpart of `composefs_oci::varlink_types::LayerRef`.
+#[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
+pub struct LayerRef {
+    /// OCI diff-id of the layer.
+    pub diff_id: String,
+    /// Hex-encoded fs-verity hash of the layer splitstream.
+    pub layer_verity: String,
+}
+
+/// Reply from `FinalizeImage` (never sent: this store is read-only).
+///
+/// Wire-format counterpart of `composefs_oci::varlink_types::FinalizeImageReply`.
+#[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
+pub struct FinalizeImageReply {
+    /// OCI digest of the manifest.
+    pub manifest_digest: String,
+    /// Hex-encoded fs-verity hash of the manifest splitstream.
+    pub manifest_verity: String,
+    /// OCI digest of the config.
+    pub config_digest: String,
+    /// Hex-encoded fs-verity hash of the config splitstream.
+    pub config_verity: String,
+}
+
+/// Errors from the `io.cncf.composefs.OciTransfer` interface.
+///
+/// Wire-format counterpart of `composefs_oci::varlink_types::OciTransferError`:
+/// the same variants in the same order, so both services describe the same
+/// interface.
 #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-#[zlink(interface = "io.cncf.composefs.Oci")]
-pub enum CstorOciError {
-    /// The repository could not be found or opened.
+#[zlink(interface = "io.cncf.composefs.OciTransfer")]
+pub enum CstorTransferError {
+    /// The store could not be found or opened.
     RepoNotFound { message: String },
     /// The given handle is ignored (stateless service).
     InvalidHandle { handle: u64 },
-    /// The named OCI image/reference does not exist.
-    NoSuchImage { image: String },
     /// Internal error.
     InternalError { message: String },
     /// Layer not found.
@@ -124,15 +188,18 @@ pub enum CstorOciError {
     InvalidRequest { message: String },
     /// Too many fds for a single non-streaming reply.
     FdLimitExceeded { fd_count: u64, max_per_frame: u64 },
+    /// The store is read-only (always, for this service's Put methods).
+    ReadOnly,
 }
 
 // ── CstorLayerService ─────────────────────────────────────────────────────────
 
-/// Stateless service implementing the `io.cncf.composefs.Oci` interface, backed
-/// by a containers-storage layer store.
+/// Stateless service implementing the `io.cncf.composefs.OciTransfer`
+/// interface, backed by a containers-storage layer store.
 ///
-/// Only `GetInfo` and `GetLayer` are implemented; all other methods return
-/// a `MethodNotFound` error from zlink.
+/// Only `GetInfo` and `GetLayer` do real work. The store is read-only, so
+/// `PutLayer` and `FinalizeImage` return `ReadOnly`; `HasLayer` returns
+/// `InvalidRequest` because the call carries no storage path to search.
 #[derive(Debug, Default)]
 pub struct CstorLayerService;
 
@@ -289,13 +356,14 @@ mod service_impl {
     #![allow(missing_docs)]
 
     use super::{
-        CstorLayerService, CstorOciError, GetInfoReply, GetLayerParams, GetLayerReply, Layer,
-        LayerStoreLock, MAX_FDS_PER_FRAME, Storage, build_layer_fd_layout, open_layer_diff_fds,
+        CstorLayerService, CstorTransferError, FinalizeImageReply, GetInfoReply, GetLayerParams,
+        GetLayerReply, HasLayerReply, Layer, LayerRef, LayerStoreLock, MAX_FDS_PER_FRAME,
+        PutLayerReply, Storage, build_layer_fd_layout, open_layer_diff_fds,
         produce_splitdirfdstream, seed_from_id, spawn_self_reaping_producer, split_fds_into_frames,
     };
 
     #[zlink::service(
-        interface = "io.cncf.composefs.Oci",
+        interface = "io.cncf.composefs.OciTransfer",
         vendor = "org.composefs",
         product = "composefs-storage",
         version = env!("CARGO_PKG_VERSION"),
@@ -303,13 +371,26 @@ mod service_impl {
     )]
     impl<Sock> CstorLayerService {
         /// Advertise the capabilities of this service.
-        async fn get_info(&self) -> std::result::Result<GetInfoReply, CstorOciError> {
+        async fn get_info(&self) -> std::result::Result<GetInfoReply, CstorTransferError> {
             Ok(GetInfoReply {
                 features: vec![
                     "splitdirfdstream-v0".into(),
                     "source-containers-storage".into(),
                     "read-only".into(),
                 ],
+            })
+        }
+
+        /// Not supported: the call carries no storage path, so there is no
+        /// store to search. Returns `InvalidRequest`.
+        async fn has_layer(
+            &self,
+            handle: u64,
+            diff_id: String,
+        ) -> std::result::Result<HasLayerReply, CstorTransferError> {
+            let _ = (handle, diff_id);
+            Err(CstorTransferError::InvalidRequest {
+                message: "HasLayer: the containers-storage service has no store to search".into(),
             })
         }
 
@@ -330,7 +411,7 @@ mod service_impl {
             #[zlink(fds)] _fds: Vec<std::os::fd::OwnedFd>,
         ) -> impl zlink::futures_util::Stream<
             Item = (
-                std::result::Result<zlink::Reply<GetLayerReply>, CstorOciError>,
+                std::result::Result<zlink::Reply<GetLayerReply>, CstorTransferError>,
                 Vec<std::os::fd::OwnedFd>,
             ),
         > + Unpin {
@@ -339,7 +420,7 @@ mod service_impl {
             let _ = handle; // stateless — handle is ignored
 
             type StreamItem = (
-                std::result::Result<zlink::Reply<GetLayerReply>, CstorOciError>,
+                std::result::Result<zlink::Reply<GetLayerReply>, CstorTransferError>,
                 Vec<std::os::fd::OwnedFd>,
             );
 
@@ -355,7 +436,7 @@ mod service_impl {
             // Extract storage locator (required).
             let locator = match params.storage {
                 Some(l) => l,
-                None => err_stream!(CstorOciError::InvalidRequest {
+                None => err_stream!(CstorTransferError::InvalidRequest {
                     message: "GetLayer: params.storage is required for the cstor service".into(),
                 }),
             };
@@ -365,13 +446,13 @@ mod service_impl {
             // Open storage and locate the layer.
             let storage = match Storage::open(&storage_path) {
                 Ok(s) => s,
-                Err(e) => err_stream!(CstorOciError::RepoNotFound {
+                Err(e) => err_stream!(CstorTransferError::RepoNotFound {
                     message: format!("{e:#}"),
                 }),
             };
             let layer = match Layer::open(&storage, &layer_id) {
                 Ok(l) => l,
-                Err(_) => err_stream!(CstorOciError::NoSuchLayer {
+                Err(_) => err_stream!(CstorTransferError::NoSuchLayer {
                     diff_id: layer_id.clone(),
                 }),
             };
@@ -383,7 +464,7 @@ mod service_impl {
             // Lock → open ordering is atomic w.r.t. concurrent `podman rmi`.
             let lock: LayerStoreLock = match storage.lock_layers_shared() {
                 Ok(l) => l,
-                Err(e) => err_stream!(CstorOciError::InternalError {
+                Err(e) => err_stream!(CstorTransferError::InternalError {
                     message: format!("lock_layers_shared: {e:#}"),
                 }),
             };
@@ -393,7 +474,7 @@ mod service_impl {
             // build_layer_fd_layout so that both paths share one implementation.
             let (real_fds, link_ids) = match open_layer_diff_fds(&storage, &layer) {
                 Ok(pair) => pair,
-                Err(e) => err_stream!(CstorOciError::InternalError {
+                Err(e) => err_stream!(CstorTransferError::InternalError {
                     message: format!("open diff dirs: {e:#}"),
                 }),
             };
@@ -402,7 +483,7 @@ mod service_impl {
             let (read_fd, write_fd) =
                 match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
                     Ok(p) => p,
-                    Err(e) => err_stream!(CstorOciError::InternalError {
+                    Err(e) => err_stream!(CstorTransferError::InternalError {
                         message: format!("pipe: {e}"),
                     }),
                 };
@@ -412,7 +493,7 @@ mod service_impl {
             // dummy-fd parity rule (ordinal-based, not slot-value-based).
             let layout = match build_layer_fd_layout(read_fd, real_fds, seed) {
                 Ok(l) => l,
-                Err(e) => err_stream!(CstorOciError::InternalError {
+                Err(e) => err_stream!(CstorTransferError::InternalError {
                     message: format!("build_layer_fd_layout: {e}"),
                 }),
             };
@@ -433,7 +514,7 @@ mod service_impl {
                     (b, n)
                 }
                 Err((_fds, e)) => {
-                    err_stream!(CstorOciError::FdLimitExceeded {
+                    err_stream!(CstorTransferError::FdLimitExceeded {
                         fd_count: e.fd_count as u64,
                         max_per_frame: MAX_FDS_PER_FRAME as u64,
                     })
@@ -467,6 +548,33 @@ mod service_impl {
                 )
             }))
             .right_stream()
+        }
+
+        /// The store is read-only: always returns `ReadOnly`. The fds are
+        /// closed unread, so a client already writing into the pipe gets
+        /// `EPIPE`; clients should check `GetInfo` for `read-only` first.
+        async fn put_layer(
+            &self,
+            handle: u64,
+            diff_id: String,
+            zerocopy: bool,
+            #[zlink(fds)] fds: Vec<std::os::fd::OwnedFd>,
+        ) -> std::result::Result<PutLayerReply, CstorTransferError> {
+            let _ = (handle, diff_id, zerocopy, fds);
+            Err(CstorTransferError::ReadOnly)
+        }
+
+        /// The store is read-only: always returns `ReadOnly`.
+        async fn finalize_image(
+            &self,
+            handle: u64,
+            manifest_json: String,
+            config_json: String,
+            layers: Vec<LayerRef>,
+            name: Option<String>,
+        ) -> std::result::Result<FinalizeImageReply, CstorTransferError> {
+            let _ = (handle, manifest_json, config_json, layers, name);
+            Err(CstorTransferError::ReadOnly)
         }
     }
 }
@@ -997,12 +1105,36 @@ mod tests {
 
     // ── C2/C3: CstorLayerService in-process GetLayer round-trip ─────────────
 
-    /// Proxy trait for the io.cncf.composefs.Oci interface (cstor client side).
-    #[zlink::proxy(interface = "io.cncf.composefs.Oci")]
-    trait CstorOciProxy {
+    /// Proxy trait for the io.cncf.composefs.OciTransfer interface (cstor
+    /// client side).
+    #[zlink::proxy(interface = "io.cncf.composefs.OciTransfer")]
+    trait CstorTransferProxy {
         async fn get_info(
             &mut self,
-        ) -> zlink::Result<std::result::Result<GetInfoReply, CstorOciError>>;
+        ) -> zlink::Result<std::result::Result<GetInfoReply, CstorTransferError>>;
+
+        async fn has_layer(
+            &mut self,
+            handle: u64,
+            diff_id: &str,
+        ) -> zlink::Result<std::result::Result<HasLayerReply, CstorTransferError>>;
+
+        async fn put_layer(
+            &mut self,
+            handle: u64,
+            diff_id: &str,
+            zerocopy: bool,
+            #[zlink(fds)] fds: Vec<std::os::fd::OwnedFd>,
+        ) -> zlink::Result<std::result::Result<PutLayerReply, CstorTransferError>>;
+
+        async fn finalize_image(
+            &mut self,
+            handle: u64,
+            manifest_json: &str,
+            config_json: &str,
+            layers: Vec<LayerRef>,
+            name: Option<&str>,
+        ) -> zlink::Result<std::result::Result<FinalizeImageReply, CstorTransferError>>;
 
         #[zlink(more, return_fds)]
         async fn get_layer(
@@ -1012,7 +1144,7 @@ mod tests {
         ) -> zlink::Result<
             impl zlink::futures_util::Stream<
                 Item = zlink::Result<(
-                    std::result::Result<GetLayerReply, CstorOciError>,
+                    std::result::Result<GetLayerReply, CstorTransferError>,
                     Vec<std::os::fd::OwnedFd>,
                 )>,
             >,
@@ -1136,6 +1268,46 @@ mod tests {
 
         // Drop lifetime fds → signals producer (keepalive EOF).
         drop(lifetime_fds);
+
+        drop(client);
+        server.shutdown().await;
+    }
+
+    /// containers-storage is a read-only store: it advertises `read-only`,
+    /// answers both Put methods with `ReadOnly`, and rejects `HasLayer`,
+    /// which carries no storage path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cstor_transfer_read_only() {
+        let (mut client, server) = spawn_in_process(CstorLayerService).unwrap();
+
+        let info = client.get_info().await.unwrap().unwrap();
+        assert!(info.features.iter().any(|f| f == "read-only"));
+
+        let (pipe_read, _pipe_write) = rustix::pipe::pipe().unwrap();
+        let dir = std::fs::File::open("/").unwrap();
+        let put = client
+            .put_layer(0, "sha256:00", false, vec![pipe_read, dir.into()])
+            .await
+            .unwrap();
+        assert!(
+            matches!(put, Err(CstorTransferError::ReadOnly)),
+            "PutLayer: {put:?}"
+        );
+
+        let fin = client
+            .finalize_image(0, "{}", "{}", vec![], None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(fin, Err(CstorTransferError::ReadOnly)),
+            "FinalizeImage: {fin:?}"
+        );
+
+        let has = client.has_layer(0, "sha256:00").await.unwrap();
+        assert!(
+            matches!(has, Err(CstorTransferError::InvalidRequest { .. })),
+            "HasLayer: {has:?}"
+        );
 
         drop(client);
         server.shutdown().await;

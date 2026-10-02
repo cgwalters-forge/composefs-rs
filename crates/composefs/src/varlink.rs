@@ -1,12 +1,18 @@
 //! # Varlink API
 //!
 //! `cfsctl varlink` exposes a [varlink] RPC service over a Unix socket
-//! with two interfaces:
+//! with three interfaces:
 //!
 //! - **`io.cncf.composefs.Repository`** — repository lifecycle, integrity
 //!   checks, garbage collection, and mounting
 //! - **`io.cncf.composefs.Oci`** — OCI container image operations (listing,
 //!   pulling, inspecting, tagging, mounting)
+//! - **`io.cncf.composefs.OciTransfer`** — moving OCI images and layers
+//!   between stores (`GetInfo`, `HasLayer`, `GetLayer`, `PutLayer`,
+//!   `FinalizeImage`). Every store serves this same interface: the
+//!   containers-storage helper does too, and so does the Go server in
+//!   container-libs. A read-only store advertises the `read-only` feature
+//!   token in `GetInfo` and answers the Put methods with `ReadOnly`.
 //!
 //! This API is language-agnostic and usable from any varlink client.
 //! Like the Rust crate API, it is not yet declared stable.

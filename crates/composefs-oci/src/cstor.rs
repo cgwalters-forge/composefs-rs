@@ -14,7 +14,7 @@
 //!
 //! When importing from containers-storage, we:
 //! 1. Open the storage and locate the image
-//! 2. For each layer, stream it via the `io.cncf.composefs.Oci` zlink service
+//! 2. For each layer, stream it via the `io.cncf.composefs.OciTransfer` zlink service
 //! 3. For large files (> INLINE_CONTENT_MAX_V0), reflink directly to objects/
 //! 4. For small files, embed inline in the splitstream
 //! 5. Handle overlay whiteouts properly
@@ -54,7 +54,7 @@ use cstorage::{
     spawn_cstor_in_process,
 };
 
-use crate::varlink_types::{GetLayerParams, OciProxy as _, StorageLocator};
+use crate::varlink_types::{GetLayerParams, OciTransferProxy as _, StorageLocator};
 
 // Re-export init_if_helper for consumers that need userns helper support
 pub use cstorage::init_if_helper;
@@ -271,7 +271,7 @@ fn storage_search_paths() -> Vec<String> {
 ///
 /// Layer discovery is done synchronously via `spawn_blocking`, then each
 /// layer is imported asynchronously through the in-process `CstorLayerService`
-/// (`io.cncf.composefs.Oci` zlink interface).
+/// (`io.cncf.composefs.OciTransfer` zlink interface).
 #[allow(clippy::too_many_arguments)]
 async fn import_from_containers_storage_direct<ObjectID: FsVerityHashValue>(
     repo: &Arc<Repository<ObjectID>>,
@@ -376,7 +376,7 @@ async fn import_from_containers_storage_direct<ObjectID: FsVerityHashValue>(
     .context("spawn_blocking(finalize_import) failed")?
 }
 
-/// Import a single layer via the in-process `io.cncf.composefs.Oci` zlink service.
+/// Import a single layer via the in-process `io.cncf.composefs.OciTransfer` zlink service.
 ///
 /// Calls `get_layer(0, GetLayerParams{storage:Some(StorageLocator{...})})`,
 /// collects all frames, then drains the `splitdirfdstream` pipe in a
@@ -405,7 +405,7 @@ async fn import_layer_via_transfer<ObjectID: FsVerityHashValue>(
     let stream = client
         .get_layer(0, params)
         .await
-        .with_context(|| format!("Oci.GetLayer RPC failed for {storage_layer_id}"))?;
+        .with_context(|| format!("OciTransfer.GetLayer RPC failed for {storage_layer_id}"))?;
 
     // Collect all frames.  Each frame carries a batch of FDs; concatenate them
     // in arrival order to reconstruct the full logical FD array:
@@ -418,19 +418,22 @@ async fn import_layer_via_transfer<ObjectID: FsVerityHashValue>(
         use zlink::futures_util::StreamExt as _;
         let mut stream = std::pin::pin!(stream);
         while let Some(item) = stream.next().await {
-            let (result, frame_fds) =
-                item.with_context(|| format!("Oci.GetLayer stream error for {storage_layer_id}"))?;
-            let frame_reply = result.map_err(|e| anyhow::anyhow!("Oci.GetLayer error: {e:?}"))?;
+            let (result, frame_fds) = item.with_context(|| {
+                format!("OciTransfer.GetLayer stream error for {storage_layer_id}")
+            })?;
+            let frame_reply =
+                result.map_err(|e| anyhow::anyhow!("OciTransfer.GetLayer error: {e:?}"))?;
             reply_opt = Some(frame_reply);
             fds.extend(frame_fds);
         }
     }
-    let reply = reply_opt.ok_or_else(|| anyhow::anyhow!("Oci.GetLayer yielded no frames"))?;
+    let reply =
+        reply_opt.ok_or_else(|| anyhow::anyhow!("OciTransfer.GetLayer yielded no frames"))?;
 
     // At minimum: 1 pipe fd + dir_count slots + 1 keepalive fd.
     anyhow::ensure!(
         fds.len() >= reply.dir_count as usize + 2,
-        "Oci.GetLayer: expected at least {} fds (1 pipe + {} dirfd slots + 1 keepalive), got {}",
+        "OciTransfer.GetLayer: expected at least {} fds (1 pipe + {} dirfd slots + 1 keepalive), got {}",
         2 + reply.dir_count,
         reply.dir_count,
         fds.len()
@@ -473,7 +476,7 @@ async fn import_layer_via_transfer<ObjectID: FsVerityHashValue>(
 /// Proxied (rootless) implementation of containers-storage import.
 ///
 /// Mirrors `import_from_containers_storage_direct` exactly, but acquires the
-/// `io.cncf.composefs.Oci` zlink client from the userns helper subprocess instead
+/// `io.cncf.composefs.OciTransfer` zlink client from the userns helper subprocess instead
 /// of an in-process server.  Metadata resolution (layer IDs, diff_ids, config)
 /// runs in `spawn_blocking` using the same `resolve_image_layers` path as the
 /// direct path, so the two paths remain behaviorally identical.
@@ -503,7 +506,7 @@ async fn import_from_containers_storage_proxied<ObjectID: FsVerityHashValue>(
 
     stats.layers = resolved.layers.len() as u64;
 
-    // Spawn the userns helper; it serves the io.cncf.composefs.Oci zlink service
+    // Spawn the userns helper; it serves the io.cncf.composefs.OciTransfer zlink service
     // (CstorLayerService) over a Unix socket.  We drive it through
     // `proxy.connection()` exactly as the direct path drives the in-process client.
     let mut proxy = StorageProxy::spawn()
