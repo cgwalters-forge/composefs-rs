@@ -41,6 +41,11 @@ store-failure-output = true
 #
 # NOTE: use /regex/ syntax, not ~substring — the ~ operator treats ^ $ as
 # literal characters, so ~^foo never matches anything.
+#
+# Each one also boots a VM, and several pull images from registries in it,
+# so retry once: a VM that stops answering or a registry hiccup would
+# otherwise fail the whole job (nextest still reports the test as FLAKY).
 [[profile.integration.overrides]]
 filter = 'test(/^privileged_/)'
 threads-required = 2
+retries = 1

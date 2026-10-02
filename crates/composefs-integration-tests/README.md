@@ -75,6 +75,7 @@ podman run --privileged -v $(pwd):/src:Z -w /src \
 | `CFSCTL_PATH` | Path to `cfsctl` binary. Auto-detected if not set. |
 | `COMPOSEFS_TEST_IMAGE` | Container image for VM dispatch. Setting this triggers bcvk auto-dispatch for privileged tests. |
 | `BCVK_PATH` | Path to `bcvk` binary. Found in `PATH` if not set. |
+| `COMPOSEFS_VM_LOG_DIR` | Keep the journal and console of each VM whose test fails in `<dir>/<test>-<attempt>/` (needs bcvk 0.18 or newer). |
 | `COMPOSEFS_IN_VM` | Set automatically inside VMs to prevent recursive dispatch. |
 
 ## Adding tests
