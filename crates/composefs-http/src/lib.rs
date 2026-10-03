@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use composefs::digest::{Digest, Sha256};
 use composefs::util::DigestWrite;
@@ -24,12 +24,9 @@ use composefs::{
     fsverity::FsVerityHashValue, repository::Repository, splitstream::SplitStreamReader,
 };
 
-/// Initial number of concurrent HTTP object fetch requests.
-///
-/// Matches the default `SETTINGS_MAX_CONCURRENT_STREAMS` value from RFC 7540
-/// §6.5.2.  This bounds the JoinSet backlog while new tasks are queued as
-/// existing ones complete.
-const INITIAL_CONCURRENT_REQUESTS: usize = 100;
+/// Bound downloads and repository writes in both fetch phases without buffering
+/// an unbounded number of object bodies or pending tasks.
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 
 /// Options for a [`download`] operation.
 #[derive(Default)]
@@ -88,8 +85,15 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
 
     async fn ensure_object(&self, id: &ObjectID) -> Result<bool> {
         if self.repo.open_object(id).is_err() {
-            let (data, _is_symlink) = self.fetch("objects/", &id.to_object_pathname()).await?;
-            let actual_id = self.repo.ensure_object_async(data.into()).await?;
+            let (data, _is_symlink) = self
+                .fetch("objects/", &id.to_object_pathname())
+                .await
+                .with_context(|| format!("Fetching object {id:?}"))?;
+            let actual_id = self
+                .repo
+                .ensure_object_async(data.into())
+                .await
+                .with_context(|| format!("Storing object {id:?}"))?;
             if actual_id != *id {
                 bail!("Downloaded {id:?} but it has fs-verity {actual_id:?}");
             }
@@ -122,11 +126,29 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
         let mut splitstreams = HashMap::from([(my_id.clone(), None)]);
         let mut splitstreams_todo = vec![my_id.clone()];
 
-        // Recursively fetch all splitstreams
-        // TODO: make this parallel, at least the ensure_object() part...
-        while let Some(id) = splitstreams_todo.pop() {
-            // this is the slow part (downloads, writing to disk, etc.)
-            if self.ensure_object(&id).await? {
+        // Fetch splitstreams concurrently, but discover references serially as
+        // each fetch completes. Keep scheduled IDs across both fetch phases.
+        let mut scheduled = HashSet::new();
+        let mut streams_set = JoinSet::new();
+        loop {
+            while streams_set.len() < MAX_CONCURRENT_REQUESTS {
+                let Some(id) = splitstreams_todo.pop() else {
+                    break;
+                };
+                if scheduled.insert(id.clone()) {
+                    let self_ = Arc::clone(self);
+                    streams_set.spawn(async move {
+                        let fetched = self_.ensure_object(&id).await?;
+                        Ok::<_, anyhow::Error>((id, fetched))
+                    });
+                }
+            }
+
+            let Some(result) = streams_set.join_next().await else {
+                break;
+            };
+            let (id, fetched) = result??;
+            if fetched {
                 self.reporter.report(ProgressEvent::Message(format!(
                     "Fetched splitstream {id:?}"
                 )));
@@ -170,6 +192,9 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
             })?;
         }
 
+        // An object reference may have been collected before a later stream
+        // identifies the same ID as a splitstream.
+        objects_todo.retain(|id| scheduled.insert(id.clone()));
         let objects_total = objects_todo.len() as u64;
         let fetch_id = ComponentId::from(format!("objects:{name}"));
         self.reporter.report(ProgressEvent::Started {
@@ -184,7 +209,7 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
         let mut fetched: u64 = 0;
 
         // Queue up the initial batch of concurrent requests.
-        for id in iter.by_ref().take(INITIAL_CONCURRENT_REQUESTS) {
+        for id in iter.by_ref().take(MAX_CONCURRENT_REQUESTS) {
             let self_ = Arc::clone(self);
             set.spawn(async move { self_.ensure_object(&id).await });
         }
@@ -292,3 +317,6 @@ pub async fn download<ObjectID: FsVerityHashValue>(
 
     downloader.ensure_stream(name).await
 }
+
+#[cfg(test)]
+mod tests;
