@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::{CStr, OsStr},
     fs::File,
-    io::{BufRead, Read, Write},
+    io::{self, BufRead, Read, Write},
     mem::MaybeUninit,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -235,10 +235,22 @@ impl<ObjectID: FsVerityHashValue> ObjectStore<ObjectID> for FlatDigestStore {
     }
 }
 
+fn copy_file_contents(mut source: impl Read, mut destination: impl Write) -> io::Result<()> {
+    let mut buffer = [0; IO_BUF_CAPACITY];
+    loop {
+        match source.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(n) => destination.write_all(&buffer[..n])?,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Attempt to use O_TMPFILE + rename to atomically set file contents.
 /// Will fall back to a non-atomic write if the target doesn't support O_TMPFILE.
 #[context("Setting file contents for {}", name.to_string_lossy())]
-fn set_file_contents(dirfd: &OwnedFd, name: &OsStr, stat: &Stat, data: &[u8]) -> Result<()> {
+fn set_file_contents(dirfd: &OwnedFd, name: &OsStr, stat: &Stat, data: impl Read) -> Result<()> {
     match openat(
         dirfd,
         ".",
@@ -247,8 +259,7 @@ fn set_file_contents(dirfd: &OwnedFd, name: &OsStr, stat: &Stat, data: &[u8]) ->
     ) {
         Ok(tmp) => {
             let mut tmp = File::from(tmp);
-            tmp.write_all(data)
-                .context("Failed to write data to tmpfile")?;
+            copy_file_contents(data, &mut tmp).context("Failed to copy data to tmpfile")?;
             tmp.sync_data().context("Failed to sync tmpfile data")?;
             linkat(
                 CWD,
@@ -269,7 +280,7 @@ fn set_file_contents(dirfd: &OwnedFd, name: &OsStr, stat: &Stat, data: &[u8]) ->
             )
             .with_context(|| format!("Failed to create file {}", name.to_string_lossy()))?;
             let mut f = File::from(fd);
-            f.write_all(data).context("Failed to write file data")?;
+            copy_file_contents(data, &mut f).context("Failed to copy file data")?;
             f.sync_data().context("Failed to sync file data")?;
         }
         Err(e) => Err(e)?,
@@ -305,21 +316,16 @@ fn write_leaf<ObjectID: FsVerityHashValue>(
 
     match &leaf.content {
         LeafContent::Regular(RegularFile::Inline(data)) => {
-            set_file_contents(dirfd, name, &leaf.stat, data)?
+            set_file_contents(dirfd, name, &leaf.stat, data.as_ref())?
         }
         LeafContent::Regular(
-            RegularFile::External(id, size) | RegularFile::ExternalNoVerity(id, size),
+            RegularFile::External(id, _) | RegularFile::ExternalNoVerity(id, _),
         ) => {
             let object = repo.open_object(id)?;
-            // TODO: make this better.  At least needs to be EINTR-safe.  Could even do reflink in some cases.
-            // Regardless we shouldn't read the whole file into memory.
-            let size = (*size).try_into().context("size overflow")?;
-            let mut buffer = vec![MaybeUninit::uninit(); size];
-            let (data, _) = read(object, &mut buffer)?;
-            set_file_contents(dirfd, name, &leaf.stat, data)?;
+            set_file_contents(dirfd, name, &leaf.stat, File::from(object))?;
         }
         LeafContent::Regular(RegularFile::Sparse(..)) => {
-            set_file_contents(dirfd, name, &leaf.stat, &[])?;
+            set_file_contents(dirfd, name, &leaf.stat, &[] as &[u8])?;
         }
         LeafContent::BlockDevice(rdev) => mknodat(dirfd, name, FileType::BlockDevice, mode, *rdev)?,
         LeafContent::CharacterDevice(rdev) => {
@@ -951,6 +957,7 @@ pub async fn read_container_root<ObjectID: FsVerityHashValue>(
 mod tests {
     use super::*;
     use rustix::fs::{CWD, openat};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_write_contents() -> Result<()> {
@@ -970,9 +977,81 @@ mod tests {
             st_mtim_nsec: Default::default(),
             xattrs: Default::default(),
         };
-        set_file_contents(&td, OsStr::new("testfile"), &st, b"new contents").unwrap();
+        set_file_contents(&td, OsStr::new("testfile"), &st, &b"new contents"[..]).unwrap();
         drop(td);
         assert_eq!(std::fs::read(testpath)?, b"new contents");
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkout_external_contents() -> Result<()> {
+        use crate::{fsverity::Sha256HashValue, repository::RepositoryConfig};
+
+        let td = tempfile::tempdir()?;
+        let (repo, _) = Repository::<Sha256HashValue>::init_path(
+            CWD,
+            td.path().join("repo"),
+            RepositoryConfig::default().set_insecure(),
+        )?;
+        for size in [0, IO_BUF_CAPACITY, 3 * 1024 * 1024 + 123] {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let id = repo.ensure_object(&data)?;
+            for content in [
+                RegularFile::External(id.clone(), size as u64),
+                RegularFile::ExternalNoVerity(id, size as u64),
+            ] {
+                let output = tempfile::tempdir_in(td.path())?;
+                let mut fs = FileSystem::new(Stat::default());
+                let leaf = fs.push_leaf(
+                    Stat {
+                        st_mode: 0o700,
+                        ..Stat::default()
+                    },
+                    LeafContent::Regular(content.clone()),
+                );
+                fs.root.insert(OsStr::new("file"), Inode::leaf(leaf));
+                write_to_path(&repo, &fs, output.path())?;
+                let path = output.path().join("file");
+                assert_eq!(std::fs::read(&path)?, data, "{content:?}");
+                assert_eq!(std::fs::metadata(&path)?.len(), size as u64);
+                assert_eq!(
+                    std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_copy_file_contents_short_reads_and_interruptions() -> Result<()> {
+        struct ShortReader<'a> {
+            data: &'a [u8],
+            interrupt: bool,
+        }
+
+        impl Read for ShortReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                assert_eq!(buffer.len(), IO_BUF_CAPACITY);
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                let n = buffer.len().min(self.data.len()).min(7);
+                self.data.read(&mut buffer[..n])
+            }
+        }
+
+        for size in [0, 1, IO_BUF_CAPACITY, IO_BUF_CAPACITY + 123] {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let source = ShortReader {
+                data: &data,
+                interrupt: false,
+            };
+            let mut output = Vec::new();
+            copy_file_contents(source, &mut output)?;
+            assert_eq!(output, data, "size {size}");
+        }
         Ok(())
     }
 
