@@ -60,7 +60,10 @@ use anyhow::{Context, Result, ensure};
 pub use containers_image_proxy::oci_spec::image::Digest as OciDigest;
 
 use composefs::digest::{Digest, Sha256};
-use containers_image_proxy::ImageProxyConfig;
+
+/// Configuration for the skopeo image proxy used by [`PullOptions`].
+pub use containers_image_proxy::ImageProxyConfig;
+
 use containers_image_proxy::oci_spec::image::ImageConfiguration;
 use containers_image_proxy::oci_spec::image::{Descriptor, ImageManifest, MediaType};
 

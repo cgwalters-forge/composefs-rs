@@ -73,6 +73,25 @@ pub(crate) const OCI_MANIFEST_CONTENT_TYPE: u64 = u64::from_le_bytes(*b"ocimanif
 /// Content type for arbitrary blobs (OCI artifacts with non-tar media types).
 pub(crate) const OCI_BLOB_CONTENT_TYPE: u64 = u64::from_le_bytes(*b"oci_blob");
 
+fn configure_image_proxy(
+    config: Option<ImageProxyConfig>,
+    skopeo_cmd: Option<Command>,
+) -> ImageProxyConfig {
+    let mut config = config.unwrap_or_default();
+    if config.skopeo_cmd.is_none() {
+        config.skopeo_cmd = skopeo_cmd;
+    }
+    // containers-image-proxy 0.11 only emits the flag for skipping TLS
+    // verification. Explicit verification must also override registries.conf.
+    if config.insecure_skip_tls_verification == Some(false) {
+        config
+            .skopeo_cmd
+            .get_or_insert_with(|| Command::new("skopeo"))
+            .arg("--tls-verify=true");
+    }
+    config
+}
+
 struct ImageOp<ObjectID: FsVerityHashValue> {
     repo: Arc<Repository<ObjectID>>,
     proxy: ImageProxy,
@@ -122,21 +141,7 @@ impl<ObjectID: FsVerityHashValue> ImageOp<ObjectID> {
             image_ref
         };
 
-        let config = match img_proxy_config {
-            Some(mut conf) => {
-                if conf.skopeo_cmd.is_none() {
-                    conf.skopeo_cmd = skopeo_cmd;
-                }
-
-                conf
-            }
-
-            None => {
-                let mut conf = ImageProxyConfig::default();
-                conf.skopeo_cmd = skopeo_cmd;
-                conf
-            }
-        };
+        let config = configure_image_proxy(img_proxy_config, skopeo_cmd);
 
         let proxy = containers_image_proxy::ImageProxy::new_with_config(config)
             .await
@@ -669,4 +674,52 @@ pub async fn pull<ObjectID: FsVerityHashValue>(
         pull_image(repo, imgref, reference, img_proxy_config, reporter, None).await?;
     let (config_digest, config_verity) = result.into_config();
     Ok((config_digest, config_verity, stats))
+}
+
+#[cfg(test)]
+mod proxy_config_tests {
+    use super::*;
+
+    #[test]
+    fn tls_verification_arguments() {
+        // Outer None means no config; inner None means an omitted TLS option.
+        for skip_tls in [None, Some(None), Some(Some(false)), Some(Some(true))] {
+            for command_kind in ["default", "transport", "custom"] {
+                let mut transport_cmd = Command::new("podman");
+                transport_cmd.args(["unshare", "skopeo"]);
+                let mut config = skip_tls.map(|skip_tls| {
+                    let mut config = ImageProxyConfig::default();
+                    config.insecure_skip_tls_verification = skip_tls;
+                    config
+                });
+                if command_kind == "custom" {
+                    let mut cmd = Command::new("custom-wrapper");
+                    cmd.args(["--wrapper-option", "skopeo"]);
+                    config.get_or_insert_with(Default::default).skopeo_cmd = Some(cmd);
+                }
+                let config = configure_image_proxy(
+                    config,
+                    (command_kind != "default").then_some(transport_cmd),
+                );
+                let cmd = Command::try_from(config).unwrap();
+                let (program, prefix): (&str, &[&str]) = match command_kind {
+                    "transport" => ("podman", &["unshare", "skopeo"]),
+                    "custom" => ("custom-wrapper", &["--wrapper-option", "skopeo"]),
+                    _ => ("skopeo", &[]),
+                };
+                assert_eq!(cmd.get_program(), program);
+                let mut expected = prefix.to_vec();
+                if skip_tls == Some(Some(false)) {
+                    expected.push("--tls-verify=true");
+                }
+                expected.push("experimental-image-proxy");
+                if skip_tls == Some(Some(true)) {
+                    expected.push("--tls-verify=false");
+                }
+                // Debug may also be enabled by the dependency's environment.
+                let args: Vec<_> = cmd.get_args().filter(|arg| *arg != "--debug").collect();
+                assert_eq!(args, expected, "{command_kind}, skip_tls={skip_tls:?}");
+            }
+        }
+    }
 }
