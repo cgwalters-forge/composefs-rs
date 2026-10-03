@@ -79,7 +79,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{CStr, CString, OsStr, OsString},
+    ffi::OsStr,
     fmt,
     fs::{File, canonicalize},
     io::{BufRead, Read, Write},
@@ -2960,15 +2960,29 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
     }
 
     #[context("Reading symlink hash value from {name:?}")]
-    fn read_symlink_hashvalue(dirfd: &OwnedFd, name: &CStr) -> Result<ObjectID> {
-        let link_content = readlinkat(dirfd, name, []).context("Reading symlink target")?;
+    fn read_symlink_hashvalue(dirfd: &OwnedFd, name: &Path) -> Result<Option<ObjectID>> {
+        // Let the kernel resolve nested aliases and symlink chains. The fd path
+        // identifies the object even when the ref points directly into objects/.
+        let Some(target) = openat(dirfd, name, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+            .filter_errno(Errno::NOENT)
+            .context("Opening symlink target")?
+        else {
+            return Ok(None);
+        };
+        let link_content = readlinkat(rustix::fs::CWD, proc_self_fd(&target), [])
+            .context("Reading resolved object path")?;
         ObjectID::from_object_pathname(link_content.to_bytes())
+            .map(Some)
             .context("Parsing object ID from symlink target")
     }
 
     #[context("Walking symlink directory")]
-    fn walk_symlinkdir(fd: OwnedFd, entry_digests: &mut HashSet<OsString>) -> Result<()> {
-        for item in Dir::read_from(&fd).context("Reading directory entries")? {
+    fn walk_symlinkdir(
+        fd: &OwnedFd,
+        path: &Path,
+        entry_paths: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
+        for item in Dir::read_from(fd).context("Reading directory entries")? {
             let entry = item.context("Reading directory entry")?;
             // NB: the underlying filesystem must support returning filetype via direntry
             // that's a reasonable assumption, since it must also support fsverity...
@@ -2977,30 +2991,24 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                     let filename = entry.file_name();
                     if filename != c"." && filename != c".." {
                         let dirfd = openat(
-                            &fd,
+                            fd,
                             filename,
                             OFlags::RDONLY | OFlags::CLOEXEC,
                             Mode::empty(),
                         )
                         .context("Opening subdirectory for walking")?;
-                        Self::walk_symlinkdir(dirfd, entry_digests)?;
+                        Self::walk_symlinkdir(
+                            &dirfd,
+                            &path.join(OsStr::from_bytes(filename.to_bytes())),
+                            entry_paths,
+                        )?;
                     }
                 }
                 FileType::Symlink => {
-                    let link_content = readlinkat(&fd, entry.file_name(), [])
-                        .context("Reading symlink content")?;
-                    let linked_path = Path::new(OsStr::from_bytes(link_content.as_bytes()));
-                    if let Some(entry_name) = linked_path.file_name() {
-                        entry_digests.insert(entry_name.to_os_string());
-                    } else {
-                        // Does not have a proper file base name (i.e. "..")
-                        // TODO: this case needs to be checked in fsck implementation
-                        continue;
-                    }
+                    entry_paths.insert(path.join(OsStr::from_bytes(entry.file_name().to_bytes())));
                 }
-                _ => {
-                    bail!("Unexpected file type encountered");
-                }
+                // Structural validation belongs to fsck, not GC.
+                _ => {}
             }
         }
 
@@ -3022,10 +3030,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
     // object IDs for each entry
     // Under RefsOnly mode, only entries explicitly referenced in `<category>/refs`
     // directory structure would be walked and returned
-    // Under AllEntries mode, all entires will be returned
-    // Note that this function assumes all`*/refs/` links link to 1st level entries
-    // and all 1st level entries link to object store
-    // TODO: fsck the above noted assumption
+    // Under AllEntries mode, all symlinks (including nested aliases) are returned.
     #[context("Walking GC category '{category}'")]
     fn gc_category(
         &self,
@@ -3043,7 +3048,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
             return Ok(Vec::new());
         };
 
-        let mut entry_digests = HashSet::new();
+        let mut entry_paths = HashSet::new();
         match mode {
             GCCategoryWalkMode::RefsOnly => {
                 if let Some(refs) = openat(
@@ -3055,62 +3060,41 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                 .filter_errno(Errno::NOENT)
                 .context(format!("Opening {category}/refs dir in repository"))?
                 {
-                    Self::walk_symlinkdir(refs, &mut entry_digests)
+                    Self::walk_symlinkdir(&refs, Path::new("refs"), &mut entry_paths)
                         .context("Walking refs symlink directory")?;
                 }
             }
             GCCategoryWalkMode::AllEntries => {
-                // All first-level link entries should be directly object references
-                for item in Dir::read_from(&category_fd).context("Reading category directory")? {
-                    let entry = item.context("Reading category directory entry")?;
-                    let filename = entry.file_name();
-                    if filename != c"refs" && filename != c"." && filename != c".." {
-                        if entry.file_type() != FileType::Symlink {
-                            bail!("category directory contains non-symlink");
-                        }
-                        entry_digests.insert(OsString::from(&OsStr::from_bytes(
-                            entry.file_name().to_bytes(),
-                        )));
-                    }
-                }
+                Self::walk_symlinkdir(&category_fd, Path::new(""), &mut entry_paths)?;
             }
         }
 
-        let objects = entry_digests
-            .into_iter()
-            .map(|entry_fn| {
-                Ok((
-                    Self::read_symlink_hashvalue(
-                        &category_fd,
-                        CString::new(entry_fn.as_bytes())
-                            .context("Creating CString from filename")?
-                            .as_c_str(),
-                    )
-                    .context("Reading symlink hash value")?,
-                    entry_fn
-                        .to_str()
-                        .context("str conversion fails")?
-                        .to_owned(),
-                ))
-            })
-            .collect::<Result<_>>()?;
+        let mut objects = Vec::new();
+        for path in entry_paths {
+            if let Some(id) = Self::read_symlink_hashvalue(&category_fd, &path)? {
+                objects.push((
+                    id,
+                    path.to_str().context("str conversion fails")?.to_owned(),
+                ));
+            }
+        }
 
         Ok(objects)
     }
 
-    // Remove all broken links from a directory, may operate recursively
-    /// Remove broken symlinks from a directory.
+    /// Remove broken symlinks recursively from a directory.
     /// If `dry_run` is true, counts but does not remove. Returns the count.
     #[context("Cleaning up broken links")]
-    fn cleanup_broken_links(fd: &OwnedFd, recursive: bool, dry_run: bool) -> Result<u64> {
+    fn cleanup_broken_links(
+        fd: &OwnedFd,
+        live_objects: &HashSet<ObjectID>,
+        dry_run: bool,
+    ) -> Result<u64> {
         let mut count = 0;
         for item in Dir::read_from(fd).context("Reading directory for broken links cleanup")? {
             let entry = item.context("Reading directory entry for broken links cleanup")?;
             match entry.file_type() {
                 FileType::Directory => {
-                    if !recursive {
-                        continue;
-                    }
                     let filename = entry.file_name();
                     if filename != c"." && filename != c".." {
                         let dirfd = openat(
@@ -3120,17 +3104,20 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                             Mode::empty(),
                         )
                         .context("Opening subdirectory for recursive broken link cleanup")?;
-                        count += Self::cleanup_broken_links(&dirfd, recursive, dry_run)
+                        count += Self::cleanup_broken_links(&dirfd, live_objects, dry_run)
                             .context("Cleaning up broken links in subdirectory")?;
                     }
                 }
 
                 FileType::Symlink => {
                     let filename = entry.file_name();
-                    let result = statat(fd, filename, AtFlags::empty())
-                        .filter_errno(Errno::NOENT)
-                        .context("Testing for broken links")?;
-                    if result.is_none() {
+                    let target = Self::read_symlink_hashvalue(
+                        fd,
+                        Path::new(OsStr::from_bytes(filename.to_bytes())),
+                    )?;
+                    // During a dry run, unreferenced objects still exist, but
+                    // their aliases would become dangling after collection.
+                    if target.is_none_or(|id| !live_objects.contains(&id)) {
                         count += 1;
                         if !dry_run {
                             unlinkat(fd, filename, AtFlags::empty())
@@ -3139,9 +3126,8 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                     }
                 }
 
-                _ => {
-                    bail!("Unexpected file type encountered");
-                }
+                // Leave incidental files and structural validation to fsck.
+                _ => {}
             }
         }
         Ok(count)
@@ -3149,7 +3135,12 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
 
     /// Clean up broken links in a gc category. Returns count of links removed.
     #[context("Cleaning up broken links in {category} category")]
-    fn cleanup_gc_category(&self, category: &'static str, dry_run: bool) -> Result<u64> {
+    fn cleanup_gc_category(
+        &self,
+        category: &'static str,
+        live_objects: &HashSet<ObjectID>,
+        dry_run: bool,
+    ) -> Result<u64> {
         let Some(category_fd) = self
             .openat(
                 category,
@@ -3160,23 +3151,9 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
         else {
             return Ok(0);
         };
-        // Always cleanup first-level first, then the refs
-        let mut count = Self::cleanup_broken_links(&category_fd, false, dry_run)
-            .with_context(|| format!("Cleaning up broken links in {category}/"))?;
-        let ref_fd = openat(
-            &category_fd,
-            "refs",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .filter_errno(Errno::NOENT)
-        .context(format!("Opening {category}/refs to clean up broken links"))?;
-        if let Some(ref dirfd) = ref_fd {
-            count += Self::cleanup_broken_links(dirfd, true, dry_run).with_context(|| {
-                format!("Cleaning up broken links recursively in {category}/refs")
-            })?;
-        }
-        Ok(count)
+        // Match discovery: aliases may be nested anywhere in the category.
+        Self::cleanup_broken_links(&category_fd, live_objects, dry_run)
+            .with_context(|| format!("Cleaning up broken links recursively in {category}/"))
     }
 
     // Traverse split streams to resolve all linked objects
@@ -3409,10 +3386,10 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
 
         // Clean up broken symlinks
         result.images_pruned = self
-            .cleanup_gc_category("images", dry_run)
+            .cleanup_gc_category("images", &live_objects, dry_run)
             .context("Cleaning up broken image symlinks")?;
         result.streams_pruned = self
-            .cleanup_gc_category("streams", dry_run)
+            .cleanup_gc_category("streams", &live_objects, dry_run)
             .context("Cleaning up broken stream symlinks")?;
 
         // Downgrade to shared lock if we had exclusive (for actual GC)
@@ -4318,6 +4295,128 @@ mod tests {
     }
 
     #[test]
+    fn test_gc_collects_unrooted_nested_alias() -> Result<()> {
+        let tmp = tempdir();
+        let repo = create_test_repo(&tmp.path().join("repo"))?;
+        let mut streams = Vec::new();
+        for (name, seed, reference) in [
+            ("by-sha256/live", 0xAE, Some("nested/live")),
+            ("aliases/unrooted", 0xEA, None),
+        ] {
+            let payload = generate_test_data(32 * 1024, seed);
+            let payload_id: Sha512HashValue = compute_verity(&payload);
+            let mut writer = repo.create_stream(0)?;
+            writer.write_external(&payload)?;
+            let id = repo.write_stream(writer, name, reference)?;
+            streams.push((name, id, payload_id));
+        }
+
+        let preview = repo.gc_dry_run(&[])?;
+        assert_eq!(preview.objects_removed, 2);
+        assert_eq!(preview.streams_pruned, 1);
+        assert_eq!(preview.images_pruned, 0);
+        for (name, id, payload_id) in &streams {
+            assert!(test_path_exists_in_repo(&tmp, format!("streams/{name}"))?);
+            assert!(test_object_exists(&tmp, id)?);
+            assert!(test_object_exists(&tmp, payload_id)?);
+        }
+
+        let result = repo.gc(&[])?;
+        assert_eq!(result.objects_removed, preview.objects_removed);
+        assert_eq!(result.objects_bytes, preview.objects_bytes);
+        assert_eq!(result.streams_pruned, preview.streams_pruned);
+        assert_eq!(result.images_pruned, preview.images_pruned);
+        for (name, id, payload_id) in &streams {
+            let live = *name == "by-sha256/live";
+            assert_eq!(
+                test_path_exists_in_repo(&tmp, format!("streams/{name}"))?,
+                live
+            );
+            assert_eq!(test_object_exists(&tmp, id)?, live);
+            assert_eq!(test_object_exists(&tmp, payload_id)?, live);
+        }
+        assert!(test_path_exists_in_repo(&tmp, "streams/refs/nested/live")?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gc_nested_stream_refs() -> Result<()> {
+        for layout in ["toplevel", "by-sha256", "direct", "chain"] {
+            let tmp = tempdir();
+            let repo = create_test_repo(&tmp.path().join("repo"))?;
+            let unused = repo.ensure_object(b"unreferenced object")?;
+            let payload = generate_test_data(32 * 1024, 0xAE);
+            let child_payload = generate_test_data(64 * 1024, 0xEA);
+            let payload_id: Sha512HashValue = compute_verity(&payload);
+            let child_payload_id: Sha512HashValue = compute_verity(&child_payload);
+
+            // The child has only a nested alias, and is not itself a GC root.
+            let child_name = "by-sha256/child";
+            let mut writer = repo.create_stream(0)?;
+            writer.write_external(&child_payload)?;
+            let child_id = repo.write_stream(writer, child_name, None)?;
+
+            let stream_name = if layout == "by-sha256" {
+                "refs/by-sha256/root"
+            } else {
+                "test-stream"
+            };
+            let root_name = "refs/nested/root";
+            let mut writer = repo.create_stream(0)?;
+            writer.write_external(&payload)?;
+            writer.add_named_stream_ref("child", &child_id);
+            let stream_id = repo.write_stream(writer, stream_name, Some("nested/root"))?;
+            match layout {
+                "direct" => {
+                    repo.symlink(
+                        format!("streams/{root_name}"),
+                        Repository::<Sha512HashValue>::format_object_path(&stream_id),
+                    )?;
+                    unlinkat(&repo.repository, "streams/test-stream", AtFlags::empty())?;
+                }
+                "chain" => {
+                    repo.symlink("streams/aliases/indirect", "streams/test-stream")?;
+                    repo.symlink(format!("streams/{root_name}"), "streams/aliases/indirect")?;
+                }
+                _ => {}
+            }
+
+            // Incidental files should neither become roots nor prevent cleanup.
+            for path in ["streams/notes", "streams/refs/nested/notes"] {
+                std::fs::write(tmp.path().join("repo").join(path), b"notes")?;
+            }
+            repo.symlink("streams/refs/nested/broken", "streams/missing")?;
+
+            let preview = repo.gc_dry_run(&[])?;
+            assert_eq!(preview.objects_removed, 1, "{layout}");
+            assert_eq!(preview.streams_pruned, 1, "{layout}");
+            assert!(test_object_exists(&tmp, &unused)?, "{layout}");
+            assert!(test_path_exists_in_repo(
+                &tmp,
+                "streams/refs/nested/broken"
+            )?);
+
+            let result = repo.gc(&[])?;
+            assert_eq!(result.objects_removed, 1, "{layout}");
+            assert_eq!(result.objects_bytes, preview.objects_bytes, "{layout}");
+            assert_eq!(result.streams_pruned, 1, "{layout}");
+            assert_eq!(result.images_pruned, 0, "{layout}");
+            assert!(!test_object_exists(&tmp, &unused)?, "{layout}");
+            for id in [&stream_id, &child_id, &payload_id, &child_payload_id] {
+                assert!(test_object_exists(&tmp, id)?, "{layout}: {id:?}");
+            }
+            assert!(!test_path_exists_in_repo(
+                &tmp,
+                "streams/refs/nested/broken"
+            )?);
+            let mut merged = Vec::new();
+            repo.merge_splitstream(root_name, None, None, &mut merged)?;
+            assert_eq!(merged, payload, "{layout}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_gc_keeps_one_stream_from_two_overlapped() -> Result<()> {
         let tmp = tempdir();
         let repo = create_test_repo(&tmp.path().join("repo"))?;
@@ -4760,6 +4859,39 @@ mod tests {
         assert!(result.objects_bytes > 0);
         assert_eq!(result.images_pruned, 0);
         assert_eq!(result.streams_pruned, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gc_nested_image_ref_to_object() -> Result<()> {
+        let tmp = tempdir();
+        let repo = create_test_repo(&tmp.path().join("repo"))?;
+        let unused = repo.ensure_object(b"unreferenced object")?;
+        let payload = generate_test_data(32 * 1024, 0xAE);
+        let payload_id = repo.ensure_object(&payload)?;
+        let image_id = make_test_fs(&payload_id, payload.len() as u64).commit_image(&repo, None)?;
+        repo.symlink(
+            "images/refs/nested/direct",
+            Repository::<Sha512HashValue>::format_object_path(&image_id),
+        )?;
+        unlinkat(
+            &repo.repository,
+            format!("images/{}", image_id.to_hex()),
+            AtFlags::empty(),
+        )?;
+
+        assert_eq!(repo.gc_dry_run(&[])?.objects_removed, 1);
+        assert!(test_object_exists(&tmp, &unused)?);
+        let result = repo.gc(&[])?;
+        assert_eq!(result.objects_removed, 1);
+        assert_eq!(result.images_pruned, 0);
+        assert!(!test_object_exists(&tmp, &unused)?);
+        assert!(test_object_exists(&tmp, &image_id)?);
+        assert!(test_object_exists(&tmp, &payload_id)?);
+        assert_eq!(
+            repo.objects_for_image("refs/nested/direct")?,
+            HashSet::from([payload_id])
+        );
         Ok(())
     }
 
