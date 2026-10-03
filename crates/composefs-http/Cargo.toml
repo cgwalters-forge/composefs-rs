@@ -19,7 +19,9 @@ reqwest = { version = "0.13.0", features = ["zstd"] }
 tokio = { version = "1.24.2", default-features = false }
 
 [dev-dependencies]
+composefs = { workspace = true, features = ["test"] }
 similar-asserts = "2.0.0"
+tokio = { version = "1.24.2", default-features = false, features = ["net", "time"] }
 
 [lints]
 workspace = true
