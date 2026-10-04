@@ -1199,8 +1199,12 @@ fn test_varlink_open_repository_invalid_spec() -> Result<()> {
 
     let svc = VarlinkService::repository(repo)?;
 
-    // No selector field at all.
-    let err = svc.call_expect_err("io.cncf.composefs.Repository.OpenRepository", json!({}))?;
+    // No selector is set. Explicit nulls keep varlinkctl from omitting the
+    // parameters object, which zlink requires when decoding this method.
+    let err = svc.call_expect_err(
+        "io.cncf.composefs.Repository.OpenRepository",
+        json!({"path": null, "user": null, "system": null}),
+    )?;
     assert!(
         err.contains("InvalidSpec"),
         "expected InvalidSpec for empty params, got: {err}"
