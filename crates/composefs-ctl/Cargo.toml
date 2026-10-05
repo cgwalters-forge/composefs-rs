@@ -57,6 +57,8 @@ zlink = { workspace = true }
 similar-asserts = "2.0.0"
 tar = { version = "0.4.38", default-features = false }
 tempfile = "3.8.0"
+# Parses the served IDL in the OciTransfer snapshot test.
+zlink = { workspace = true, features = ["idl-parse"] }
 tokio = { version = "1.24.2", default-features = false, features = ["macros", "rt-multi-thread"] }
 
 [lints]

@@ -30,7 +30,7 @@ pub mod oci_layout;
 pub mod progress;
 pub mod skopeo;
 pub mod tar;
-/// Shared wire types and client proxy for the `org.composefs.Oci` interface.
+/// Wire types and client proxy for the `io.cncf.composefs.OciTransfer` interface.
 ///
 /// Available when the `varlink` feature is enabled.
 #[cfg(feature = "varlink")]
