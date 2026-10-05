@@ -1112,7 +1112,7 @@ mod service_impl {
     };
     use super::oci::{
         ListImagesReply, OciComputeIdReply, OciError, OciFsckReply, OciInspectReply, PullProgress,
-        parse_local_fetch, pull_stream,
+        RegistryOptions, parse_local_fetch, pull_stream,
     };
     use super::{
         CfsctlService, EnsureRepositoryReply, FsckReply, GcReply, ImageObjectsReply,
@@ -1396,6 +1396,9 @@ mod service_impl {
 
         /// Pull an OCI image into the repository, streaming progress.
         ///
+        /// `registry_options` configures skopeo authentication and TLS. Paths
+        /// are resolved on the service host; omitted options use proxy defaults.
+        ///
         /// Emits zero or more intermediate [`PullProgress`] frames describing
         /// fetch progress (only when `more` is true), followed by exactly one
         /// terminal frame whose `completed` field is set, carrying the pull result.
@@ -1421,6 +1424,7 @@ mod service_impl {
             bootable: bool,
             xattrs: Option<composefs_oci::XattrFiltering>,
             expected_digest: Option<String>,
+            registry_options: Option<RegistryOptions>,
         ) -> impl zlink::futures_util::Stream<
             Item = std::result::Result<zlink::Reply<PullProgress>, OciError>,
         > {
@@ -1440,6 +1444,7 @@ mod service_impl {
                     bootable,
                     xattrs,
                     expected_digest,
+                    registry_options,
                     more,
                 ),
                 Some(OpenRepo::Sha512(r)) => pull_stream::<Sha512HashValue>(
@@ -1451,6 +1456,7 @@ mod service_impl {
                     bootable,
                     xattrs,
                     expected_digest,
+                    registry_options,
                     more,
                 ),
                 None => {
@@ -2083,6 +2089,136 @@ where
 pub mod oci {
     use super::*;
 
+    /// Registry authentication and TLS options for an OCI pull.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, zlink::introspect::Type)]
+    pub struct RegistryOptions {
+        /// Authentication file path on the service host.
+        pub auth_file: Option<String>,
+        /// Registry certificate directory on the service host.
+        pub cert_dir: Option<String>,
+        /// Whether to verify TLS certificates; omitted uses the proxy default.
+        pub tls_verify: Option<bool>,
+    }
+
+    fn registry_proxy_config(
+        options: Option<RegistryOptions>,
+    ) -> Option<composefs_oci::ImageProxyConfig> {
+        options.map(|options| {
+            let mut config = composefs_oci::ImageProxyConfig::default();
+            config.authfile = options.auth_file.map(PathBuf::from);
+            config.certificate_directory = options.cert_dir.map(PathBuf::from);
+            config.insecure_skip_tls_verification = options.tls_verify.map(|verify| !verify);
+            config
+        })
+    }
+
+    #[cfg(test)]
+    mod registry_options_tests {
+        use super::*;
+
+        #[test]
+        fn conversion() {
+            let cases = [
+                (None, None),
+                (Some(RegistryOptions::default()), Some((None, None, None))),
+                (
+                    Some(RegistryOptions {
+                        auth_file: Some("/auth.json".into()),
+                        ..Default::default()
+                    }),
+                    Some((Some("/auth.json"), None, None)),
+                ),
+                (
+                    Some(RegistryOptions {
+                        cert_dir: Some("/certs".into()),
+                        tls_verify: Some(false),
+                        ..Default::default()
+                    }),
+                    Some((None, Some("/certs"), Some(true))),
+                ),
+                (
+                    Some(RegistryOptions {
+                        tls_verify: Some(true),
+                        ..Default::default()
+                    }),
+                    Some((None, None, Some(false))),
+                ),
+            ];
+            for (options, expected) in cases {
+                let config = registry_proxy_config(options);
+                assert_eq!(config.is_some(), expected.is_some());
+                if let Some((auth, cert, skip_tls)) = expected {
+                    let config = config.unwrap();
+                    assert_eq!(config.authfile, auth.map(PathBuf::from));
+                    assert_eq!(config.certificate_directory, cert.map(PathBuf::from));
+                    assert_eq!(config.insecure_skip_tls_verification, skip_tls);
+                    assert!(!config.auth_anonymous);
+                    assert!(config.insecure_policy.is_none());
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn omitted_field_and_introspection() {
+            let (mut client, server) = spawn_in_process(CfsctlService::default()).unwrap();
+            // Send the old wire parameters without registry_options. Reaching
+            // handle lookup proves the generated dispatcher accepted the call.
+            let call = zlink::Call::new(serde_json::json!({
+                "method": "org.composefs.Oci.Pull",
+                "parameters": {
+                    "handle": 42,
+                    "image": "docker://example.com/image:latest",
+                    "local_fetch": "disabled",
+                    "bootable": false
+                }
+            }));
+            let (reply, fds) = client
+                .call_method::<_, PullProgress, OciError>(&call, vec![])
+                .await
+                .unwrap();
+            assert!(fds.is_empty());
+            assert!(matches!(reply, Err(OciError::InvalidHandle { handle: 42 })));
+
+            let call = zlink::Call::new(serde_json::json!({
+                "method": "org.varlink.service.GetInterfaceDescription",
+                "parameters": { "interface": "org.composefs.Oci" }
+            }));
+            #[derive(Debug, Deserialize)]
+            struct Description {
+                description: String,
+            }
+
+            let (reply, fds) = client
+                .call_method::<_, Description, OciError>(&call, vec![])
+                .await
+                .unwrap();
+            assert!(fds.is_empty());
+            let parameters = reply.unwrap().into_parameters().unwrap();
+            // The derive expands structs inline and includes field doc comments.
+            let idl = parameters.description;
+            let idl = idl
+                .lines()
+                .map(|line| line.split('#').next().unwrap().trim())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let pull = idl
+                .split("method Pull(")
+                .nth(1)
+                .unwrap()
+                .split(" -> ")
+                .next()
+                .unwrap();
+            assert!(
+                pull.contains(
+                    "registry_options: ?( auth_file: ?string, cert_dir: ?string, tls_verify: ?bool)"
+                ),
+                "{pull}"
+            );
+            drop(client);
+            server.join().unwrap();
+        }
+    }
+
     /// Summary of a stored OCI image for the varlink wire format.
     #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
     pub struct ImageEntry {
@@ -2541,6 +2677,7 @@ pub mod oci {
         bootable: bool,
         xattrs: Option<composefs_oci::XattrFiltering>,
         expected_digest: Option<String>,
+        registry_options: Option<RegistryOptions>,
         more: bool,
     ) -> std::pin::Pin<
         Box<
@@ -2599,6 +2736,7 @@ pub mod oci {
         let use_bootable_opt = want_bootable_pull(bootable, expected_digest.is_some(), xattrs);
         let handle = tokio::task::spawn_local(async move {
             let opts = composefs_oci::PullOptions {
+                img_proxy_config: registry_proxy_config(registry_options),
                 local_fetch,
                 storage_root: storage_root.as_deref(),
                 progress: reporter,
@@ -2949,6 +3087,7 @@ pub mod proxy {
     #[cfg(feature = "oci")]
     use super::oci::{
         ListImagesReply, OciComputeIdReply, OciError, OciFsckReply, OciInspectReply, PullProgress,
+        RegistryOptions,
     };
     use super::{
         EnsureRepositoryReply, FsckReply, GcReply, ImageObjectsReply, InitRepositoryReply,
@@ -3076,6 +3215,7 @@ pub mod proxy {
             bootable: bool,
             xattrs: Option<composefs_oci::XattrFiltering>,
             expected_digest: Option<&str>,
+            registry_options: Option<RegistryOptions>,
         ) -> zlink::Result<impl Stream<Item = zlink::Result<Result<PullProgress, OciError>>>>;
 
         /// Query capability tokens supported by the service.
