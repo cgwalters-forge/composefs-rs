@@ -119,6 +119,9 @@ impl std::fmt::Debug for IndicatifReporter {
 #[cfg(any(feature = "oci", feature = "http", feature = "ostree"))]
 impl ProgressReporter for IndicatifReporter {
     fn report(&self, event: ProgressEvent) {
+        // The `bars.lock().unwrap()` calls below can only fail if a previous
+        // holder panicked while holding the lock; `report()` has no way to
+        // return an error, so propagating that panic is the intended outcome.
         match event {
             ProgressEvent::Started { id, total, unit } => {
                 let bar = if let Some(total) = total {
@@ -1547,6 +1550,24 @@ pub(crate) fn resolve_oci_config<ObjectID: FsVerityHashValue>(
     }
 }
 
+/// Return the deployment state directory for the boot image with `digest_hex`.
+///
+/// This lives under `state/deploy` next to the repository: in the parent
+/// directory of `repo`, or in `/sysroot` when no repository path was given.
+#[cfg(feature = "oci")]
+fn deploy_state_dir(repo: Option<&Path>, digest_hex: &str) -> Result<PathBuf> {
+    let sysroot = match repo {
+        Some(repo) => repo.parent().with_context(|| {
+            format!(
+                "Finding the parent directory of repository {}",
+                repo.display()
+            )
+        })?,
+        None => Path::new("/sysroot"),
+    };
+    Ok(sysroot.join("state/deploy").join(digest_hex))
+}
+
 #[cfg(feature = "oci")]
 fn load_filesystem_from_oci_image<ObjectID: FsVerityHashValue>(
     repo: &Repository<ObjectID>,
@@ -2155,13 +2176,7 @@ where
                     &cmdline_refs,
                 )?;
 
-                let state = args
-                    .repo
-                    .as_ref()
-                    .map(|p: &PathBuf| p.parent().unwrap())
-                    .unwrap_or(Path::new("/sysroot"))
-                    .join("state/deploy")
-                    .join(karg.digest().to_hex());
+                let state = deploy_state_dir(args.repo.as_deref(), &karg.digest().to_hex())?;
 
                 create_dir_all(state.join("var"))?;
                 create_dir_all(state.join("etc/upper"))?;
@@ -2461,8 +2476,9 @@ where
             let out = dump_files(&repo, &image_name, &files, backing_path_only)?;
 
             if !out.is_empty() {
-                let out_str = std::str::from_utf8(&out).unwrap();
-                print!("{}", out_str);
+                std::io::stdout()
+                    .write_all(&out)
+                    .context("Writing dump-files output to stdout")?;
             }
         }
         Command::Fsck {
@@ -2648,5 +2664,26 @@ mod tests {
             id: "layer:a".into(),
             transferred: 100,
         });
+    }
+
+    // ── deploy_state_dir ─────────────────────────────────────────────────────
+
+    #[cfg(feature = "oci")]
+    #[test]
+    fn test_deploy_state_dir() {
+        assert_eq!(
+            deploy_state_dir(None, "abcd").unwrap(),
+            Path::new("/sysroot/state/deploy/abcd")
+        );
+        assert_eq!(
+            deploy_state_dir(Some(Path::new("/sysroot/composefs")), "abcd").unwrap(),
+            Path::new("/sysroot/state/deploy/abcd")
+        );
+        // The root directory has no parent: this used to panic.
+        let err = deploy_state_dir(Some(Path::new("/")), "abcd").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("repository /"),
+            "unexpected error: {err:#}"
+        );
     }
 }
