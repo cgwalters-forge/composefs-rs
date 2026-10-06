@@ -220,6 +220,8 @@ fn run_with_args(args: Args) -> Result<()> {
 
     // Write image (skipped when only the digest is requested)
     if !args.print_digest_only {
+        // Infallible: run_with_args() bails early if IMAGE is missing without
+        // --print-digest-only.
         let image_path = args.image.as_ref().unwrap();
         write_image(image_path, &image)?;
     }
