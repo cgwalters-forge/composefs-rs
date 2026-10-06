@@ -571,6 +571,8 @@ impl MountParams {
         let mut options = composefs::mount::MountOptions::default();
         let mut fd_iter = fds.into_iter();
         if overlay {
+            // Infallible: `fds.len() == expected_fds` was checked above and
+            // includes these two fds when `overlay` is set.
             let upperdir = fd_iter.next().unwrap();
             let workdir = fd_iter.next().unwrap();
             options.set_overlay(upperdir, workdir);
