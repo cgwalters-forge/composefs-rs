@@ -276,9 +276,11 @@ fn cmd_objects(images: &[PathBuf]) -> Result<()> {
 /// leading slashes a payload may have, so that joining it to the base
 /// directory can't replace it (like C's `abs_to_rel_path()`).
 fn object_relative_path(obj: &OsStr) -> &Path {
-    let bytes = obj.as_bytes();
-    let start = bytes.iter().position(|&b| b != b'/').unwrap_or(bytes.len());
-    Path::new(OsStr::from_bytes(&bytes[start..]))
+    let mut bytes = obj.as_bytes();
+    while let Some(rest) = bytes.strip_prefix(b"/") {
+        bytes = rest;
+    }
+    Path::new(OsStr::from_bytes(bytes))
 }
 
 /// List objects not present in basedir.
@@ -333,11 +335,17 @@ mod tests {
             ("/8a/5d74.file", "8a/5d74.file"),
             ("//8a/5d74.file", "8a/5d74.file"),
             ("/", ""),
+            ("///", ""),
+            ("", ""),
         ];
         for (obj, expected) in cases {
             let rel = object_relative_path(OsStr::new(obj));
             assert_eq!(rel, Path::new(expected), "{obj}");
             assert!(Path::new("/base").join(rel).starts_with("/base"), "{obj}");
         }
+        assert_eq!(
+            object_relative_path(OsStr::from_bytes(b"//ab/\xff")),
+            Path::new(OsStr::from_bytes(b"ab/\xff"))
+        );
     }
 }

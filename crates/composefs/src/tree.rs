@@ -97,20 +97,23 @@ impl<ObjectID: FsVerityHashValue> RegularFile<ObjectID> {
     /// redirect parsed as an object pathname.  Fails for inline and sparse
     /// files, and for an `ExternalPath` that names no object this way (like
     /// ostree's `xx/<checksum>.file` without a verity digest).
-    pub fn repo_object_id(&self) -> anyhow::Result<ObjectID> {
+    /// Borrows stored digests; parsing a redirect produces an owned digest.
+    pub fn repo_object_id(&self) -> anyhow::Result<Cow<'_, ObjectID>> {
         match self {
             Self::Inline(_) | Self::Sparse(_) => anyhow::bail!("Not an external file"),
-            Self::External(id, _) => Ok(id.clone()),
+            Self::External(id, _) => Ok(Cow::Borrowed(id)),
             Self::ExternalPath {
                 verity: Some(id), ..
-            } => Ok(id.clone()),
+            } => Ok(Cow::Borrowed(id)),
             Self::ExternalPath {
                 redirect: Some(redirect),
                 verity: None,
                 ..
-            } => ObjectID::from_object_pathname(redirect.as_bytes()).map_err(|e| {
-                anyhow::anyhow!("External file path {redirect:?} is not an object: {e}")
-            }),
+            } => ObjectID::from_object_pathname(redirect.as_bytes())
+                .map(Cow::Owned)
+                .map_err(|e| {
+                    anyhow::anyhow!("External file path {redirect:?} is not an object: {e}")
+                }),
             Self::ExternalPath {
                 redirect: None,
                 verity: None,
@@ -286,7 +289,15 @@ mod tests {
             };
             assert_eq!(found, variant, "{redirect:?} {verity:?}");
             assert_eq!(file.file_size(), 4096);
-            assert_eq!(file.repo_object_id().ok().as_ref(), object, "{file:?}");
+            let object_id = file.repo_object_id().ok();
+            assert_eq!(object_id.as_deref(), object, "{file:?}");
+            if let Some(object_id) = object_id {
+                assert_eq!(
+                    matches!(object_id, Cow::Borrowed(_)),
+                    verity.is_some(),
+                    "{file:?}"
+                );
+            }
             assert_eq!(
                 file.backing_path().as_deref(),
                 backing_path.map(OsStr::new),
