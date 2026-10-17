@@ -546,9 +546,10 @@ enum OciCommand {
     },
     /// Serve the varlink RPC API on a Unix socket or systemd socket.
     ///
-    /// Equivalent to `cfsctl varlink`: a single service answers both the
-    /// `org.composefs.Repository` and `org.composefs.Oci` interfaces on one
-    /// socket. Kept for discoverability under the `oci` subcommand.
+    /// Equivalent to `cfsctl varlink`: a single service answers the
+    /// `io.cncf.composefs.Repository`, `io.cncf.composefs.Oci` and
+    /// `io.cncf.composefs.OciTransfer` interfaces on one socket. Kept for
+    /// discoverability under the `oci` subcommand.
     Varlink {
         /// Unix socket path to listen on (omit when using systemd socket activation).
         #[clap(long, value_hint = clap::ValueHint::AnyPath)]
@@ -943,9 +944,9 @@ enum Command {
     },
     /// Serve the varlink RPC API on a Unix socket or systemd socket.
     ///
-    /// A single service answers both the `org.composefs.Repository` and (when
-    /// the `oci` feature is enabled) `org.composefs.Oci` interfaces on one
-    /// socket.
+    /// A single service answers the `io.cncf.composefs.Repository` interface
+    /// and, when the `oci` feature is enabled, `io.cncf.composefs.Oci` and
+    /// `io.cncf.composefs.OciTransfer`, on one socket.
     Varlink {
         /// Unix socket path to listen on (omit when using systemd socket activation).
         #[clap(long, value_hint = clap::ValueHint::AnyPath)]
@@ -1211,9 +1212,10 @@ pub async fn run_app(args: App) -> Result<()> {
 
     // The varlink service opens repositories on demand via `OpenRepository`
     // (handling both hash types), so it bypasses the generic repo-open dispatch
-    // below. A single `CfsctlService` answers both the `org.composefs.Repository`
-    // and (when the `oci` feature is enabled) `org.composefs.Oci` interfaces, so
-    // `cfsctl varlink` and `cfsctl oci varlink` serve the same combined service.
+    // below. A single `CfsctlService` answers `io.cncf.composefs.Repository` and
+    // (when the `oci` feature is enabled) `io.cncf.composefs.Oci` and
+    // `io.cncf.composefs.OciTransfer`, so `cfsctl varlink` and `cfsctl oci
+    // varlink` serve the same combined service.
     if let Command::Varlink { ref address } = args.cmd {
         let service = crate::varlink::CfsctlService::from_app(&args);
         return crate::varlink::serve(service, address.as_deref()).await;
@@ -1415,10 +1417,12 @@ pub async fn copy_image(
     image: &OciReference,
     name: Option<&str>,
     zerocopy: bool,
-) -> Result<crate::varlink::layer_sync::FinalizeImageReply> {
-    use crate::varlink::layer_sync::LayerRef;
+) -> Result<crate::varlink::oci_transfer::FinalizeImageReply> {
     use crate::varlink::oci::OciError;
-    use crate::varlink::proxy::{GetLayerParams, OciProxy};
+    use crate::varlink::oci_transfer::{
+        GetLayerParams, LayerRef, OciTransferError, OciTransferProxy as _,
+    };
+    use crate::varlink::proxy::OciProxy as _;
     use anyhow::ensure;
     use zlink::futures_util::StreamExt as _;
 
@@ -1448,7 +1452,7 @@ pub async fn copy_image(
             .has_layer(handle_dest, diff_id)
             .await
             .context("zlink transport error calling HasLayer")?
-            .map_err(|e: OciError| anyhow::anyhow!("HasLayer failed: {e:?}"))?;
+            .map_err(|e: OciTransferError| anyhow::anyhow!("HasLayer failed: {e:?}"))?;
 
         let layer_verity = if has.present {
             has.layer_verity
@@ -1469,8 +1473,8 @@ pub async fn copy_image(
             let mut get_reply = None;
             while let Some(item) = get_stream.next().await {
                 let (result, fds) = item.context("GetLayer stream frame error")?;
-                let reply =
-                    result.map_err(|e: OciError| anyhow::anyhow!("GetLayer failed: {e:?}"))?;
+                let reply = result
+                    .map_err(|e: OciTransferError| anyhow::anyhow!("GetLayer failed: {e:?}"))?;
                 get_reply = Some(reply);
                 all_fds.extend(fds);
             }
@@ -1484,7 +1488,7 @@ pub async fn copy_image(
                 .put_layer(handle_dest, diff_id, zerocopy, all_fds)
                 .await
                 .context("zlink transport error calling PutLayer")?
-                .map_err(|e: OciError| anyhow::anyhow!("PutLayer failed: {e:?}"))?;
+                .map_err(|e: OciTransferError| anyhow::anyhow!("PutLayer failed: {e:?}"))?;
             drop(lifetime_fds);
 
             put_reply.layer_verity
@@ -1506,7 +1510,7 @@ pub async fn copy_image(
         )
         .await
         .context("zlink transport error calling FinalizeImage")?
-        .map_err(|e: OciError| anyhow::anyhow!("FinalizeImage failed: {e:?}"))?;
+        .map_err(|e: OciTransferError| anyhow::anyhow!("FinalizeImage failed: {e:?}"))?;
 
     Ok(finalize)
 }

@@ -1,7 +1,7 @@
 //! Varlink RPC service for `cfsctl`.
 //!
 //! Exposes a subset of repository operations over a Unix-socket varlink
-//! interface (`org.composefs.Repository`) so that integration tests and
+//! interface (`io.cncf.composefs.Repository`) so that integration tests and
 //! external callers can consume structured replies instead of scraping the
 //! human-oriented CLI output.
 //!
@@ -105,9 +105,9 @@ pub struct ImageObjectsReply {
     pub object_ids: Vec<String>,
 }
 
-/// Errors that may be returned by the `org.composefs.Repository` interface.
+/// Errors that may be returned by the `io.cncf.composefs.Repository` interface.
 #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-#[zlink(interface = "org.composefs.Repository")]
+#[zlink(interface = "io.cncf.composefs.Repository")]
 pub enum RepositoryError {
     /// The repository could not be found or opened at the configured path.
     RepoNotFound {
@@ -270,8 +270,9 @@ impl Default for OpenOptions {
     }
 }
 
-/// Varlink service implementation backing the `org.composefs.Repository` (and,
-/// with the `oci` feature, `org.composefs.Oci`) interfaces.
+/// Varlink service implementation backing the `io.cncf.composefs.Repository` (and,
+/// with the `oci` feature, `io.cncf.composefs.Oci` and
+/// `io.cncf.composefs.OciTransfer`) interfaces.
 ///
 /// Holds a table of opened repositories keyed by opaque handle. The zlink
 /// server serializes calls to a single service, so the table is a plain
@@ -361,13 +362,26 @@ impl CfsctlService {
     /// Look up an open repository by handle for the OCI interface.
     ///
     /// Like [`Self::lookup_repo`] but reports the OCI-interface error so the
-    /// wire error name is `org.composefs.Oci.InvalidHandle`.
+    /// wire error name is `io.cncf.composefs.Oci.InvalidHandle`.
     #[cfg(feature = "oci")]
     fn lookup_oci(&self, handle: u64) -> std::result::Result<OpenRepo, oci::OciError> {
         self.repos
             .get(&handle)
             .map(|entry| entry.repo.clone())
             .ok_or(oci::OciError::InvalidHandle { handle })
+    }
+
+    /// Look up an open repository by handle for the OciTransfer interface,
+    /// whose wire error name is `io.cncf.composefs.OciTransfer.InvalidHandle`.
+    #[cfg(feature = "oci")]
+    fn lookup_transfer(
+        &self,
+        handle: u64,
+    ) -> std::result::Result<OpenRepo, oci_transfer::OciTransferError> {
+        self.repos
+            .get(&handle)
+            .map(|entry| entry.repo.clone())
+            .ok_or(oci_transfer::OciTransferError::InvalidHandle { handle })
     }
 
     /// Resolve, open and register a repository at `path`, returning the reply
@@ -747,7 +761,7 @@ pub(crate) fn run_ensure_repository(
     Ok(status)
 }
 
-/// OCI helper functions backing the `org.composefs.Oci` interface, gated behind
+/// OCI helper functions backing the `io.cncf.composefs.Oci` interface, gated behind
 /// the `oci` feature.
 #[cfg(feature = "oci")]
 async fn run_list_images<ObjectID: FsVerityHashValue>(
@@ -913,13 +927,14 @@ async fn run_compute_id<ObjectID: FsVerityHashValue>(
 // cannot cfg-gate individual methods (it doesn't propagate `#[cfg]`), and the
 // dispatch enum derives its variants from wire method names (so both
 // interfaces must live in ONE impl block). So when the `oci` feature is on we
-// emit a single impl that hosts BOTH `org.composefs.Repository` and
-// `org.composefs.Oci`; otherwise we emit a Repository-only impl.
+// emit a single impl that hosts `io.cncf.composefs.Repository`,
+// `io.cncf.composefs.Oci` and `io.cncf.composefs.OciTransfer`; otherwise we
+// emit a Repository-only impl.
 //
 // The interface attribute on each method is "sticky": once a method sets
-// `interface = "org.composefs.Oci"` the macro keeps using it for subsequent
+// `interface = "io.cncf.composefs.Oci"` the macro keeps using it for subsequent
 // methods until changed. The Repository methods come first and inherit the
-// seeded `org.composefs.Repository` interface.
+// seeded `io.cncf.composefs.Repository` interface.
 #[cfg(not(feature = "oci"))]
 mod service_impl {
     #![allow(missing_docs)]
@@ -933,7 +948,7 @@ mod service_impl {
     use composefs::fsverity::{Sha256HashValue, Sha512HashValue};
 
     #[zlink::service(
-        interface = "org.composefs.Repository",
+        interface = "io.cncf.composefs.Repository",
         vendor = "org.composefs",
         product = "cfsctl",
         version = env!("CARGO_PKG_VERSION"),
@@ -1099,20 +1114,22 @@ mod service_impl {
     }
 }
 
-// Combined variant: hosts BOTH the `org.composefs.Repository` and
-// `org.composefs.Oci` interfaces from a single impl block on `CfsctlService`,
-// so one service answers both interfaces on one socket. See the comment above
+// Combined variant: hosts the `io.cncf.composefs.Repository`,
+// `io.cncf.composefs.Oci` and `io.cncf.composefs.OciTransfer` interfaces from a
+// single impl block on `CfsctlService`, so one service answers all three on one
+// socket. See the comment above
 // for why this can't be cfg-gated method-by-method.
 #[cfg(feature = "oci")]
 mod service_impl {
     #![allow(missing_docs)]
 
-    use super::layer_sync::{
-        FinalizeImageReply, GetInfoReply, GetLayerReply, HasLayerReply, LayerRef, PutLayerReply,
-    };
     use super::oci::{
         ListImagesReply, OciComputeIdReply, OciError, OciFsckReply, OciInspectReply, PullProgress,
         parse_local_fetch, pull_stream,
+    };
+    use super::oci_transfer::{
+        FEATURE_SPLITDIRFDSTREAM_V0, FinalizeImageReply, GetInfoReply, GetLayerParams,
+        GetLayerReply, HasLayerReply, LayerRef, OciTransferError, PutLayerReply,
     };
     use super::{
         CfsctlService, EnsureRepositoryReply, FsckReply, GcReply, ImageObjectsReply,
@@ -1124,18 +1141,17 @@ mod service_impl {
     };
     use composefs::fsverity::{FsVerityHashValue, Sha256HashValue, Sha512HashValue};
     use composefs_oci::layer_transport::{RepoLayerSource, serve_get_layer};
-    use composefs_oci::varlink_types::GetLayerParams;
     use composefs_splitdirfdstream::seed_from_id;
 
     #[zlink::service(
-        interface = "org.composefs.Repository",
+        interface = "io.cncf.composefs.Repository",
         vendor = "org.composefs",
         product = "cfsctl",
         version = env!("CARGO_PKG_VERSION"),
         url = "https://github.com/composefs/composefs-rs"
     )]
     impl<Sock> CfsctlService {
-        // --- org.composefs.Repository (inherits the seeded interface) ---
+        // --- io.cncf.composefs.Repository (inherits the seeded interface) ---
 
         /// Initialize a new repository at the given path, or verify that an
         /// existing one matches the requested algorithm (idempotent).
@@ -1294,9 +1310,9 @@ mod service_impl {
             }
         }
 
-        // --- org.composefs.Oci ---
+        // --- io.cncf.composefs.Oci ---
         //
-        // The first OCI method sets `interface = "org.composefs.Oci"`; the
+        // The first OCI method sets `interface = "io.cncf.composefs.Oci"`; the
         // macro then keeps that interface sticky for subsequent methods. Each
         // OCI method is still annotated explicitly for clarity.
 
@@ -1304,7 +1320,7 @@ mod service_impl {
         ///
         /// When `filter` is given, only images whose name contains that
         /// substring are returned.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn list_images(
             &self,
             handle: u64,
@@ -1322,7 +1338,7 @@ mod service_impl {
         /// Renamed on the wire to `Check` so it does not collide with the
         /// repository-level `Fsck` method (the dispatch enum keys on the wire
         /// method name, which must be globally unique across both interfaces).
-        #[zlink(interface = "org.composefs.Oci", rename = "Check")]
+        #[zlink(interface = "io.cncf.composefs.Oci", rename = "Check")]
         async fn oci_fsck(
             &self,
             handle: u64,
@@ -1335,7 +1351,7 @@ mod service_impl {
         }
 
         /// Inspect a single OCI image.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn inspect(
             &self,
             handle: u64,
@@ -1348,7 +1364,7 @@ mod service_impl {
         }
 
         /// Tag a manifest digest with a name.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn tag(
             &self,
             handle: u64,
@@ -1366,7 +1382,7 @@ mod service_impl {
         }
 
         /// Remove a tag.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn untag(&self, handle: u64, name: String) -> std::result::Result<(), OciError> {
             match self.lookup_oci(handle)? {
                 OpenRepo::Sha256(ref r) => run_untag::<Sha256HashValue>(r, name).await,
@@ -1375,7 +1391,7 @@ mod service_impl {
         }
 
         /// Compute the composefs image ID for an OCI image.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.Oci")]
         async fn compute_id(
             &self,
             handle: u64,
@@ -1408,7 +1424,7 @@ mod service_impl {
         /// needed (e.g. a UKI embedding a digest produced by an older
         /// composefs-rs release with different defaults, against a
         /// repository whose format version is now fixed).
-        #[zlink(interface = "org.composefs.Oci", more)]
+        #[zlink(interface = "io.cncf.composefs.Oci", more)]
         #[allow(clippy::too_many_arguments)]
         async fn pull(
             &self,
@@ -1468,7 +1484,7 @@ mod service_impl {
         /// EROFS image (or boot variant if `bootable` is true), and creates
         /// a composefs mount. If `options.overlay` is true, the fd array
         /// must contain upperdir and workdir fds.
-        #[zlink(interface = "org.composefs.Oci", return_fds)]
+        #[zlink(interface = "io.cncf.composefs.Oci", return_fds)]
         async fn oci_mount(
             &self,
             handle: u64,
@@ -1495,19 +1511,19 @@ mod service_impl {
             }
         }
 
-        // --- org.composefs.Oci (layer-sync methods) ---
+        // --- io.cncf.composefs.OciTransfer ---
         //
-        // These methods were previously under org.composefs.LayerSync but have
-        // been folded into the Oci interface. Each carries an explicit `interface`
-        // annotation so the wire names land under the correct interface namespace.
+        // Moving images and layers between stores. Every store serves this
+        // same interface (the containers-storage service too, read-only), so
+        // it is kept apart from the composefs-specific Oci methods above.
 
         /// Return the capability tokens supported by this service.
         ///
         /// Currently advertises `"splitdirfdstream-v0"`.
-        #[zlink(interface = "org.composefs.Oci")]
-        async fn get_info(&self) -> std::result::Result<GetInfoReply, OciError> {
+        #[zlink(interface = "io.cncf.composefs.OciTransfer")]
+        async fn get_info(&self) -> std::result::Result<GetInfoReply, OciTransferError> {
             Ok(GetInfoReply {
-                features: vec!["splitdirfdstream-v0".into()],
+                features: vec![FEATURE_SPLITDIRFDSTREAM_V0.into()],
             })
         }
 
@@ -1515,25 +1531,27 @@ mod service_impl {
         ///
         /// Returns `present = true` and the hex verity if found; `present =
         /// false` and `layer_verity = None` if not.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.OciTransfer")]
         async fn has_layer(
             &self,
             handle: u64,
             diff_id: String,
-        ) -> std::result::Result<HasLayerReply, OciError> {
+        ) -> std::result::Result<HasLayerReply, OciTransferError> {
             let diff_id_parsed: composefs_oci::OciDigest =
-                diff_id.parse().map_err(|e| OciError::InvalidDigest {
-                    message: format!("{e}"),
-                })?;
+                diff_id
+                    .parse()
+                    .map_err(|e| OciTransferError::InvalidDigest {
+                        message: format!("{e}"),
+                    })?;
             let content_id = composefs_oci::layer_content_id(&diff_id_parsed);
 
             fn check<ObjectID: FsVerityHashValue>(
                 repo: &composefs::repository::Repository<ObjectID>,
                 content_id: &str,
-            ) -> std::result::Result<HasLayerReply, OciError> {
+            ) -> std::result::Result<HasLayerReply, OciTransferError> {
                 match repo
                     .has_stream(content_id)
-                    .map_err(|e| OciError::InternalError {
+                    .map_err(|e| OciTransferError::InternalError {
                         message: format!("{e:#}"),
                     })? {
                     Some(verity) => Ok(HasLayerReply {
@@ -1547,7 +1565,7 @@ mod service_impl {
                 }
             }
 
-            match self.lookup_oci(handle)? {
+            match self.lookup_transfer(handle)? {
                 OpenRepo::Sha256(ref r) => check::<Sha256HashValue>(r, &content_id),
                 OpenRepo::Sha512(ref r) => check::<Sha512HashValue>(r, &content_id),
             }
@@ -1574,7 +1592,7 @@ mod service_impl {
         /// The producer runs on `spawn_blocking` so the async task is never blocked.
         /// For the repo case there is no external lock to release, so `keepalive_read`
         /// is moved into the producer closure and dropped when the producer finishes.
-        #[zlink(interface = "org.composefs.Oci", more, return_fds)]
+        #[zlink(interface = "io.cncf.composefs.OciTransfer", more, return_fds)]
         async fn get_layer(
             &self,
             more: bool,
@@ -1583,14 +1601,14 @@ mod service_impl {
             #[zlink(fds)] _fds: Vec<std::os::fd::OwnedFd>,
         ) -> impl zlink::futures_util::Stream<
             Item = (
-                std::result::Result<zlink::Reply<GetLayerReply>, OciError>,
+                std::result::Result<zlink::Reply<GetLayerReply>, OciTransferError>,
                 Vec<std::os::fd::OwnedFd>,
             ),
         > + Unpin {
             use zlink::futures_util::stream::{self, StreamExt as _};
 
             type StreamItem = (
-                std::result::Result<zlink::Reply<GetLayerReply>, OciError>,
+                std::result::Result<zlink::Reply<GetLayerReply>, OciTransferError>,
                 Vec<std::os::fd::OwnedFd>,
             );
 
@@ -1604,7 +1622,7 @@ mod service_impl {
             // ── Extract diff_id from params (repo service requires it) ─────────
             let diff_id = match params.diff_id {
                 Some(d) => d,
-                None => err_stream!(OciError::InvalidRequest {
+                None => err_stream!(OciTransferError::InvalidRequest {
                     message: "GetLayer: diff_id is required for the repo service".into(),
                 }),
             };
@@ -1612,7 +1630,7 @@ mod service_impl {
             // ── Parse diff_id ─────────────────────────────────────────────────
             let diff_id_parsed: composefs_oci::OciDigest = match diff_id.parse() {
                 Ok(d) => d,
-                Err(e) => err_stream!(OciError::InvalidDigest {
+                Err(e) => err_stream!(OciTransferError::InvalidDigest {
                     message: format!("{e}"),
                 }),
             };
@@ -1624,14 +1642,14 @@ mod service_impl {
                 content_id: &str,
                 diff_id_str: &str,
                 more: bool,
-            ) -> std::result::Result<composefs_oci::layer_transport::GetLayerFrames, OciError>
+            ) -> std::result::Result<composefs_oci::layer_transport::GetLayerFrames, OciTransferError>
             {
                 let verity = repo
                     .has_stream(content_id)
-                    .map_err(|e| OciError::InternalError {
+                    .map_err(|e| OciTransferError::InternalError {
                         message: format!("{e:#}"),
                     })?
-                    .ok_or_else(|| OciError::NoSuchLayer {
+                    .ok_or_else(|| OciTransferError::NoSuchLayer {
                         diff_id: diff_id_str.to_string(),
                     })?;
 
@@ -1643,20 +1661,20 @@ mod service_impl {
 
                 serve_get_layer(source, seed, more).map_err(|e| match e {
                     composefs_oci::layer_transport::ServeGetLayerError::FdLimitExceeded(e) => {
-                        OciError::FdLimitExceeded {
+                        OciTransferError::FdLimitExceeded {
                             fd_count: e.fd_count as u64,
                             max_per_frame: e.max_per_frame as u64,
                         }
                     }
                     composefs_oci::layer_transport::ServeGetLayerError::Other(e) => {
-                        OciError::InternalError {
+                        OciTransferError::InternalError {
                             message: format!("{e:#}"),
                         }
                     }
                 })
             }
 
-            let frames = match self.lookup_oci(handle) {
+            let frames = match self.lookup_transfer(handle) {
                 Ok(OpenRepo::Sha256(ref r)) => {
                     do_serve_get_layer::<Sha256HashValue>(r, &content_id, &diff_id, more)
                 }
@@ -1697,22 +1715,22 @@ mod service_impl {
         /// The server runs the verified drain on a `spawn_blocking` thread so the
         /// async task is not blocked while data flows through the pipe.  The layer
         /// content is only committed if its reconstructed sha256 matches `diff_id`;
-        /// on mismatch [`OciError::DiffIdMismatch`] is returned and no stream
+        /// on mismatch [`OciTransferError::DiffIdMismatch`] is returned and no stream
         /// is committed.
         ///
         /// The server always drains the pipe to avoid wedging the client's writer
         /// even if the layer is already present — the import is idempotent.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.OciTransfer")]
         async fn put_layer(
             &self,
             handle: u64,
             diff_id: String,
             zerocopy: bool,
             #[zlink(fds)] fds: Vec<std::os::fd::OwnedFd>,
-        ) -> std::result::Result<PutLayerReply, OciError> {
+        ) -> std::result::Result<PutLayerReply, OciTransferError> {
             // Validate the fd count: fds[0] = pipe read, fds[1..] = dir fds.
             if fds.len() < 2 {
-                return Err(OciError::InvalidRequest {
+                return Err(OciTransferError::InvalidRequest {
                     message: format!(
                         "expected at least 2 fds (1 pipe + >=1 dir fd), got {}",
                         fds.len()
@@ -1721,25 +1739,27 @@ mod service_impl {
             }
 
             let diff_id_parsed: composefs_oci::OciDigest =
-                diff_id.parse().map_err(|e| OciError::InvalidDigest {
-                    message: format!("{e}"),
-                })?;
+                diff_id
+                    .parse()
+                    .map_err(|e| OciTransferError::InvalidDigest {
+                        message: format!("{e}"),
+                    })?;
 
             let content_id = composefs_oci::layer_content_id(&diff_id_parsed);
 
             // Check whether the layer is already present (for the reply flag).
             // We still proceed with the drain regardless to avoid wedging the
             // client's writer if it is already producing.
-            let already_present = match self.lookup_oci(handle)? {
+            let already_present = match self.lookup_transfer(handle)? {
                 OpenRepo::Sha256(ref r) => r
                     .has_stream(&content_id)
-                    .map_err(|e| OciError::InternalError {
+                    .map_err(|e| OciTransferError::InternalError {
                         message: format!("{e:#}"),
                     })?
                     .is_some(),
                 OpenRepo::Sha512(ref r) => r
                     .has_stream(&content_id)
-                    .map_err(|e| OciError::InternalError {
+                    .map_err(|e| OciTransferError::InternalError {
                         message: format!("{e:#}"),
                     })?
                     .is_some(),
@@ -1757,7 +1777,7 @@ mod service_impl {
                 diff_id: composefs_oci::OciDigest,
                 zerocopy: bool,
                 already_present: bool,
-            ) -> std::result::Result<PutLayerReply, OciError> {
+            ) -> std::result::Result<PutLayerReply, OciTransferError> {
                 tokio::task::spawn_blocking(move || {
                     composefs_oci::layer_sync::drain_splitdirfdstream_verified(
                         repo,
@@ -1769,7 +1789,7 @@ mod service_impl {
                     )
                 })
                 .await
-                .map_err(|e| OciError::InternalError {
+                .map_err(|e| OciTransferError::InternalError {
                     message: format!("spawn_blocking panic: {e}"),
                 })?
                 .map(|(verity, stats, _ctx)| PutLayerReply {
@@ -1784,16 +1804,16 @@ mod service_impl {
                     composefs_oci::layer_sync::VerifiedDrainError::DiffIdMismatch {
                         expected,
                         actual,
-                    } => OciError::DiffIdMismatch { expected, actual },
+                    } => OciTransferError::DiffIdMismatch { expected, actual },
                     composefs_oci::layer_sync::VerifiedDrainError::Other(err) => {
-                        OciError::InternalError {
+                        OciTransferError::InternalError {
                             message: format!("{err:#}"),
                         }
                     }
                 })
             }
 
-            match self.lookup_oci(handle)? {
+            match self.lookup_transfer(handle)? {
                 OpenRepo::Sha256(ref r) => {
                     run_put_layer::<Sha256HashValue>(
                         r.clone(),
@@ -1828,7 +1848,7 @@ mod service_impl {
         ///
         /// Returns the digest and verity strings for both the manifest and config
         /// splitstreams.
-        #[zlink(interface = "org.composefs.Oci")]
+        #[zlink(interface = "io.cncf.composefs.OciTransfer")]
         async fn finalize_image(
             &self,
             handle: u64,
@@ -1836,24 +1856,26 @@ mod service_impl {
             config_json: String,
             layers: Vec<LayerRef>,
             name: Option<String>,
-        ) -> std::result::Result<FinalizeImageReply, OciError> {
+        ) -> std::result::Result<FinalizeImageReply, OciTransferError> {
             async fn run_finalize<ObjectID: FsVerityHashValue>(
                 repo: std::sync::Arc<composefs::repository::Repository<ObjectID>>,
                 manifest_json: String,
                 config_json: String,
                 layers: Vec<LayerRef>,
                 name: Option<String>,
-            ) -> std::result::Result<FinalizeImageReply, OciError> {
+            ) -> std::result::Result<FinalizeImageReply, OciTransferError> {
                 // Parse each LayerRef into (OciDigest, ObjectID).
                 let mut layer_refs: Vec<(composefs_oci::OciDigest, ObjectID)> =
                     Vec::with_capacity(layers.len());
                 for lr in &layers {
                     let diff_id: composefs_oci::OciDigest =
-                        lr.diff_id.parse().map_err(|e| OciError::InvalidDigest {
-                            message: format!("diff_id {:?}: {e}", lr.diff_id),
-                        })?;
+                        lr.diff_id
+                            .parse()
+                            .map_err(|e| OciTransferError::InvalidDigest {
+                                message: format!("diff_id {:?}: {e}", lr.diff_id),
+                            })?;
                     let verity = ObjectID::from_hex(&lr.layer_verity).map_err(|e| {
-                        OciError::InvalidDigest {
+                        OciTransferError::InvalidDigest {
                             message: format!("layer_verity {:?}: {e}", lr.layer_verity),
                         }
                     })?;
@@ -1874,7 +1896,7 @@ mod service_impl {
                     )
                 })
                 .await
-                .map_err(|e| OciError::InternalError {
+                .map_err(|e| OciTransferError::InternalError {
                     message: format!("spawn_blocking panic: {e}"),
                 })?
                 .map(
@@ -1887,12 +1909,12 @@ mod service_impl {
                         }
                     },
                 )
-                .map_err(|e| OciError::InternalError {
+                .map_err(|e| OciTransferError::InternalError {
                     message: format!("{e:#}"),
                 })
             }
 
-            match self.lookup_oci(handle)? {
+            match self.lookup_transfer(handle)? {
                 OpenRepo::Sha256(ref r) => {
                     run_finalize::<Sha256HashValue>(
                         r.clone(),
@@ -2075,7 +2097,7 @@ where
     serve_on_listener(service, listener).await
 }
 
-/// Varlink support for the OCI interface (`org.composefs.Oci`).
+/// Varlink support for the OCI interface (`io.cncf.composefs.Oci`).
 ///
 /// Gated behind the `oci` feature; collected in one module so the feature
 /// gate lives in a single place rather than on every item.
@@ -2739,9 +2761,9 @@ pub mod oci {
         Box::pin(stream)
     }
 
-    /// Errors that may be returned by the `org.composefs.Oci` interface.
+    /// Errors that may be returned by the `io.cncf.composefs.Oci` interface.
     #[derive(Debug, zlink::ReplyError, zlink::introspect::ReplyError)]
-    #[zlink(interface = "org.composefs.Oci")]
+    #[zlink(interface = "io.cncf.composefs.Oci")]
     pub enum OciError {
         /// The repository could not be found or opened at the configured path.
         RepoNotFound {
@@ -2763,38 +2785,15 @@ pub mod oci {
             /// Description of the failure.
             message: String,
         },
-        /// The requested layer (by diff-id) is not present in the repository.
-        NoSuchLayer {
-            /// The diff-id that was not found.
-            diff_id: String,
-        },
-        /// A supplied digest/diff-id string was malformed.
+        /// A supplied digest string was malformed.
         InvalidDigest {
             /// Human-readable description of the parse failure.
             message: String,
         },
-        /// Received layer content did not hash to the declared diff-id.
-        ///
-        /// The stream was NOT committed; the client must retry with correct data.
-        DiffIdMismatch {
-            /// The diff_id that was declared by the client.
-            expected: String,
-            /// The sha256 digest of the data that was actually received.
-            actual: String,
-        },
-        /// The request was malformed (e.g. wrong fd count).
+        /// The request was malformed.
         InvalidRequest {
             /// Human-readable description of what was wrong.
             message: String,
-        },
-        /// The total fd count exceeds [`MAX_FDS_PER_FRAME`] for a `more=false` call.
-        ///
-        /// The client must retry with `more=true` (streaming mode).
-        FdLimitExceeded {
-            /// Total number of fds that would be sent.
-            fd_count: u64,
-            /// The per-frame cap that was exceeded.
-            max_per_frame: u64,
         },
         /// No combination of xattr filtering mode and EROFS format version
         /// produced a boot image matching `expected` (see the `pull`
@@ -2809,129 +2808,17 @@ pub mod oci {
     }
 }
 
-/// Reply types for the layer-sync methods of the `org.composefs.Oci` interface,
-/// gated behind the `oci` feature (they depend on [`composefs_oci::layer_sync`]).
-///
-/// The four layer-sync methods (`GetInfo`, `HasLayer`, `GetLayer`, `PutLayer`)
-/// are part of `org.composefs.Oci`; this module merely collects their reply
-/// structs to keep them separate from the rest of the OCI wire types.
+/// Wire types for the `io.cncf.composefs.OciTransfer` interface, re-exported
+/// from [`composefs_oci::varlink_types`], where they are shared with the
+/// containers-storage client.
 #[cfg(feature = "oci")]
-pub mod layer_sync {
-    use super::*;
-
-    /// Reply from `GetInfo`: capability tokens supported by this service.
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct GetInfoReply {
-        /// Capability tokens advertised by this service instance.
-        ///
-        /// Currently only `"splitdirfdstream-v0"` is defined.
-        pub features: Vec<String>,
-    }
-
-    /// Reply from `HasLayer`: whether the layer is present in the repository.
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct HasLayerReply {
-        /// Whether the layer splitstream for the given diff-id is present.
-        pub present: bool,
-        /// Hex-encoded fs-verity hash of the layer splitstream, if present.
-        pub layer_verity: Option<String>,
-    }
-
-    /// Reply from `GetLayer`: the number of diff-directory slots in the logical FD array.
-    ///
-    /// `GetLayer` is a **streaming** method (`more`): it yields multiple frames,
-    /// each carrying a batch of FDs.  The client MUST concatenate the FD batches
-    /// from all frames (in arrival order) to reconstruct the full logical FD array:
-    ///
-    /// - `fds[0]` — data pipe read end (carries the `splitdirfdstream` bytes).
-    /// - `fds[1..=dir_count]` — the dirfds region (`dir_count` slots total).  The
-    ///   real objects-directory fd sits at a sparse, hash-determined index within
-    ///   this region; the remaining (gap) slots hold inert dummy fds that
-    ///   `reconstruct` never dereferences.  The sparse placement is encoded in each
-    ///   `FileBackedData` chunk's `dirfd_index`; the client passes the whole region
-    ///   to `drain_splitdirfdstream` / `reconstruct` unchanged and must NOT assume
-    ///   the dir is at a fixed index.
-    /// - `fds[dir_count+1..]` — opaque lifetime FDs.  The client MUST hold every
-    ///   one of these open until it has finished reading and processing all dir fds,
-    ///   then close them all to signal completion to the server.  The count of
-    ///   trailing FDs is unspecified by contract; the client keeps open whatever it
-    ///   does not otherwise recognise.  This lifetime-FD convention is part of the
-    ///   `splitdirfdstream-v0` feature.
-    ///
-    /// Each transport frame carries at most `MAX_FDS_PER_FRAME` (240) fds, safely
-    /// below the kernel `SCM_MAX_FD` (253) limit.  Every frame carries the same
-    /// `dir_count`; the client should use the value from any frame (they are all
-    /// identical).  The stream terminates when a frame with `continues=false` is
-    /// received.
-    ///
-    /// A non-streaming (`more=false`) call delivers all fds in a single frame; if
-    /// the layer requires more than `MAX_FDS_PER_FRAME` fds the call returns
-    /// `FdLimitExceeded` and the client must retry with `more=true`.
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct GetLayerReply {
-        /// Number of diff-directory file descriptors in the full logical FD array
-        /// (i.e. `fds[1..=dir_count]` after concatenating all frames' batches).
-        pub dir_count: u32,
-    }
-
-    /// Reply from `PutLayer`: the verity hash of the imported layer, whether
-    /// it was already present, and per-object transfer statistics.
-    ///
-    /// The object-count fields let the client verify that zero-copy transfer
-    /// actually took place (e.g. assert `objects_reflinked > 0` in tests) and
-    /// accumulate aggregate stats for user-facing output.
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct PutLayerReply {
-        /// Hex-encoded fs-verity hash of the committed layer splitstream.
-        pub layer_verity: String,
-        /// `true` if the layer was already present before this call.
-        ///
-        /// The server always drains the pipe regardless (to avoid wedging
-        /// the client's writer), so the stream is re-imported idempotently.
-        pub already_present: bool,
-
-        /// Number of objects that were reflinked (FICLONE) into the
-        /// destination. Non-zero only when source and dest share a filesystem.
-        #[serde(default)]
-        pub objects_reflinked: u64,
-        /// Number of objects hardlinked into the destination (zerocopy mode).
-        #[serde(default)]
-        pub objects_hardlinked: u64,
-        /// Number of objects byte-copied into the destination.
-        #[serde(default)]
-        pub objects_copied: u64,
-        /// Number of objects already present in the destination (skipped).
-        #[serde(default)]
-        pub objects_already_present: u64,
-    }
-
-    /// A single (diff_id, layer_verity) pair passed to `FinalizeImage`.
-    ///
-    /// The client builds this list from the `PutLayer` replies it received while
-    /// copying layers to the destination repository.  The order must match the
-    /// manifest layer order.
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct LayerRef {
-        /// OCI diff-id of the layer (e.g. `"sha256:abcd..."`).
-        pub diff_id: String,
-        /// Hex-encoded fs-verity hash of the layer splitstream in the destination
-        /// repository, as returned by `PutLayer`.
-        pub layer_verity: String,
-    }
-
-    /// Reply from `FinalizeImage`: digest and verity strings for the manifest
-    /// and config splitstreams that were written (or already existed).
-    #[derive(Debug, Clone, Serialize, Deserialize, zlink::introspect::Type)]
-    pub struct FinalizeImageReply {
-        /// OCI digest of the manifest (e.g. `"sha256:abcd..."`).
-        pub manifest_digest: String,
-        /// Hex-encoded fs-verity hash of the manifest splitstream.
-        pub manifest_verity: String,
-        /// OCI digest of the config (e.g. `"sha256:abcd..."`).
-        pub config_digest: String,
-        /// Hex-encoded fs-verity hash of the config splitstream.
-        pub config_verity: String,
-    }
+pub mod oci_transfer {
+    pub use composefs_oci::varlink_types::{
+        FEATURE_READ_ONLY, FEATURE_SOURCE_CONTAINERS_STORAGE, FEATURE_SPLITDIRFDSTREAM_V0,
+        FinalizeImageReply, GetInfoReply, GetLayerParams, GetLayerReply, HasLayerReply, LayerRef,
+        OCI_TRANSFER_IDL, OCI_TRANSFER_INTERFACE, OciTransferError, OciTransferProxy,
+        PutLayerReply, StorageLocator,
+    };
 }
 
 /// Typed Rust client bindings (the native-API mirror of the on-the-wire
@@ -2943,24 +2830,21 @@ pub mod proxy {
     #![allow(missing_docs)]
 
     #[cfg(feature = "oci")]
-    use super::layer_sync::{
-        FinalizeImageReply, GetInfoReply, GetLayerReply, HasLayerReply, LayerRef, PutLayerReply,
-    };
-    #[cfg(feature = "oci")]
     use super::oci::{
         ListImagesReply, OciComputeIdReply, OciError, OciFsckReply, OciInspectReply, PullProgress,
     };
+    /// Typed client for the `io.cncf.composefs.OciTransfer` interface.
+    #[cfg(feature = "oci")]
+    pub use super::oci_transfer::{GetLayerParams, OciTransferProxy};
     use super::{
         EnsureRepositoryReply, FsckReply, GcReply, ImageObjectsReply, InitRepositoryReply,
         OpenRepositoryReply, RepositoryError,
     };
     #[cfg(feature = "oci")]
-    pub use composefs_oci::varlink_types::GetLayerParams;
-    #[cfg(feature = "oci")]
     use zlink::futures_util::Stream;
 
-    /// Typed client for the `org.composefs.Repository` interface.
-    #[zlink::proxy(interface = "org.composefs.Repository")]
+    /// Typed client for the `io.cncf.composefs.Repository` interface.
+    #[zlink::proxy(interface = "io.cncf.composefs.Repository")]
     pub trait RepositoryProxy {
         /// Initialize a new repository (or verify an existing one).
         async fn init_repository(
@@ -3015,9 +2899,9 @@ pub mod proxy {
         ) -> zlink::Result<Result<ImageObjectsReply, RepositoryError>>;
     }
 
-    /// Typed client for the `org.composefs.Oci` interface.
+    /// Typed client for the `io.cncf.composefs.Oci` interface.
     #[cfg(feature = "oci")]
-    #[zlink::proxy(interface = "org.composefs.Oci")]
+    #[zlink::proxy(interface = "io.cncf.composefs.Oci")]
     #[allow(clippy::too_many_arguments)]
     pub trait OciProxy {
         /// List tagged OCI images.
@@ -3077,59 +2961,6 @@ pub mod proxy {
             xattrs: Option<composefs_oci::XattrFiltering>,
             expected_digest: Option<&str>,
         ) -> zlink::Result<impl Stream<Item = zlink::Result<Result<PullProgress, OciError>>>>;
-
-        /// Query capability tokens supported by the service.
-        async fn get_info(&mut self) -> zlink::Result<Result<GetInfoReply, OciError>>;
-
-        /// Check whether a layer is present in the repository.
-        async fn has_layer(
-            &mut self,
-            handle: u64,
-            diff_id: &str,
-        ) -> zlink::Result<Result<HasLayerReply, OciError>>;
-
-        /// Stream the layer as a `splitdirfdstream` with full hardened fd-transport
-        /// contract (sparse dirfds, keepalive, lifetime fds, multi-frame).
-        ///
-        /// Drive the returned stream to completion (until `continues=false`),
-        /// concatenating each frame's fd batch in order to reconstruct the full
-        /// logical FD array `[pipe_read, dirfds.., lifetime_fds..]`.
-        #[zlink(more, return_fds)]
-        async fn get_layer(
-            &mut self,
-            handle: u64,
-            params: GetLayerParams,
-        ) -> zlink::Result<
-            impl zlink::futures_util::Stream<
-                Item = zlink::Result<(Result<GetLayerReply, OciError>, Vec<std::os::fd::OwnedFd>)>,
-            >,
-        >;
-
-        /// Receive a layer as a `splitdirfdstream` from the client and import
-        /// it into the server's repository with diff_id verification.
-        ///
-        /// `fds[0]` is the pipe read end; `fds[1..]` are source object dirs.
-        async fn put_layer(
-            &mut self,
-            handle: u64,
-            diff_id: &str,
-            zerocopy: bool,
-            #[zlink(fds)] fds: Vec<std::os::fd::OwnedFd>,
-        ) -> zlink::Result<Result<PutLayerReply, OciError>>;
-
-        /// Finalize an OCI image after all layers have been imported.
-        ///
-        /// `layers` must be in manifest layer order; each entry pairs the layer's
-        /// OCI diff-id with the hex verity returned by `PutLayer`.  `name` is the
-        /// tag to assign (optional). Idempotent.
-        async fn finalize_image(
-            &mut self,
-            handle: u64,
-            manifest_json: &str,
-            config_json: &str,
-            layers: Vec<LayerRef>,
-            name: Option<&str>,
-        ) -> zlink::Result<Result<FinalizeImageReply, OciError>>;
     }
 }
 
@@ -3202,7 +3033,7 @@ pub(crate) fn spawn_in_process(
 #[cfg(all(test, feature = "oci"))]
 mod layer_sync_tests {
     //! In-process round-trip tests for the layer-sync methods of the
-    //! `org.composefs.Oci` interface.
+    //! `io.cncf.composefs.OciTransfer` interface.
     //!
     //! These mirror the in-process transport test in
     //! `composefs-storage`'s `cstor_service.rs`.
@@ -3215,11 +3046,11 @@ mod layer_sync_tests {
     use composefs::repository::{Repository, RepositoryConfig};
     use composefs_splitdirfdstream::reconstruct;
 
-    use super::layer_sync::GetLayerReply;
-    use super::oci::OciError;
-    use super::proxy::{OciProxy, RepositoryProxy as _};
+    use super::oci_transfer::{
+        GetLayerParams, GetLayerReply, LayerRef, OciTransferError, OciTransferProxy,
+    };
+    use super::proxy::RepositoryProxy as _;
     use super::{CfsctlService, spawn_in_process};
-    use composefs_oci::varlink_types::GetLayerParams;
 
     /// Drive a streaming `get_layer` call to completion, collecting all FDs.
     ///
@@ -3232,9 +3063,9 @@ mod layer_sync_tests {
         client: &mut C,
         handle: u64,
         diff_id: &str,
-    ) -> Result<(GetLayerReply, Vec<std::os::fd::OwnedFd>), OciError>
+    ) -> Result<(GetLayerReply, Vec<std::os::fd::OwnedFd>), OciTransferError>
     where
-        C: OciProxy,
+        C: OciTransferProxy,
     {
         use zlink::futures_util::StreamExt as _;
 
@@ -3282,7 +3113,7 @@ mod layer_sync_tests {
         Vec<std::os::fd::OwnedFd>,
     )
     where
-        C: OciProxy,
+        C: OciTransferProxy,
     {
         let (reply, mut all_fds) = collect_get_layer(client, handle, diff_id)
             .await
@@ -3443,7 +3274,7 @@ mod layer_sync_tests {
         // --- GetLayer: unknown diff-id ---
         let err = collect_get_layer(&mut client, handle, fake_digest).await;
         match err {
-            Err(super::oci::OciError::NoSuchLayer { .. }) => {}
+            Err(OciTransferError::NoSuchLayer { .. }) => {}
             other => panic!("expected NoSuchLayer, got {other:?}"),
         }
     }
@@ -3627,7 +3458,7 @@ mod layer_sync_tests {
         drop(lifetime_fds);
 
         match put_err {
-            Err(super::oci::OciError::DiffIdMismatch { expected, actual }) => {
+            Err(OciTransferError::DiffIdMismatch { expected, actual }) => {
                 assert_eq!(expected, wrong_diff_id);
                 assert_eq!(actual, correct_diff_id.to_string());
             }
@@ -3762,7 +3593,7 @@ mod layer_sync_tests {
             .handle;
 
         // Build the LayerRef list.
-        let layers = vec![super::layer_sync::LayerRef {
+        let layers = vec![LayerRef {
             diff_id: diff_id.to_string(),
             layer_verity: layer_verity.to_hex(),
         }];
@@ -3835,5 +3666,53 @@ mod layer_sync_tests {
             erofs.is_some(),
             "EROFS image must exist after finalize_image"
         );
+    }
+}
+
+#[cfg(all(test, feature = "oci"))]
+mod idl_tests {
+    //! The served `io.cncf.composefs.OciTransfer` IDL must match the
+    //! checked-in description that every implementation is tested against.
+
+    use zlink::idl::Interface;
+    use zlink::varlink_service::{InterfaceDescription, Proxy as _};
+
+    use super::oci_transfer::{OCI_TRANSFER_IDL, OCI_TRANSFER_INTERFACE};
+    use super::{CfsctlService, spawn_in_process};
+
+    async fn describe(
+        conn: &mut zlink::tokio::unix::Connection,
+        name: &str,
+    ) -> InterfaceDescription<'static> {
+        conn.get_interface_description(name)
+            .await
+            .expect("transport error")
+            .unwrap_or_else(|e| panic!("GetInterfaceDescription({name}): {e:?}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oci_transfer_idl_matches_checked_in() {
+        let expected = Interface::try_from(OCI_TRANSFER_IDL).expect("parsing checked-in IDL");
+        let (mut conn, _server) = spawn_in_process(CfsctlService::new()).unwrap();
+
+        let desc = describe(&mut conn, OCI_TRANSFER_INTERFACE).await;
+        let served = desc.parse().expect("parsing served IDL");
+        // Interface equality ignores comments, so only the contract counts.
+        assert!(
+            served == expected,
+            "served {OCI_TRANSFER_INTERFACE} IDL differs from the checked-in \
+             one in composefs-oci; update it if the change is intended:\n{served}"
+        );
+
+        // The store-to-store methods live only in OciTransfer.
+        let oci_desc = describe(&mut conn, "io.cncf.composefs.Oci").await;
+        let oci = oci_desc.parse().expect("parsing served Oci IDL");
+        for m in expected.methods() {
+            assert!(
+                oci.methods().all(|o| o.name() != m.name()),
+                "io.cncf.composefs.Oci still has {}",
+                m.name()
+            );
+        }
     }
 }

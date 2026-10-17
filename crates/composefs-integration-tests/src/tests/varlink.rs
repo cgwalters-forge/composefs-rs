@@ -27,8 +27,8 @@
 //! the typed proxy when you specifically want to pin down a typed reply or a
 //! typed error variant. Avoid converting the whole suite to either side.
 //!
-//! A single service answers both the `org.composefs.Repository` and
-//! `org.composefs.Oci` interfaces on one socket. The `repository()` and
+//! A single service answers both the `io.cncf.composefs.Repository` and
+//! `io.cncf.composefs.Oci` interfaces on one socket. The `repository()` and
 //! `oci()` spawn helpers are retained for historical reasons — both now use
 //! socket activation and serve the identical combined interface set.
 //!
@@ -92,7 +92,7 @@ impl VarlinkService {
     /// its metadata, so no open flags are needed.
     ///
     /// Socket activation serves the full combined interface set
-    /// (`org.composefs.Repository` + `org.composefs.Oci`) regardless of which
+    /// (`io.cncf.composefs.Repository` + `io.cncf.composefs.Oci`) regardless of which
     /// of the historical CLI entry points would have been used.
     fn spawn(repo: &Path) -> Result<Self> {
         let (child, socket_dir, socket) = crate::spawn_activated_cfsctl()?;
@@ -122,7 +122,7 @@ impl VarlinkService {
                 "--json=short",
                 "call",
                 &sock_str,
-                "org.composefs.Repository.OpenRepository",
+                "io.cncf.composefs.Repository.OpenRepository",
                 &params,
             ])
             .output()
@@ -220,7 +220,7 @@ impl VarlinkService {
         zlink::tokio::unix::connect(&self.socket).await
     }
 
-    /// `org.composefs.Oci.Inspect` via the typed proxy, using the cached handle.
+    /// `io.cncf.composefs.Oci.Inspect` via the typed proxy, using the cached handle.
     fn proxy_inspect(&self, image: &str) -> zlink::Result<Result<OciInspectReply, OciError>> {
         self.rt.block_on(async {
             let mut conn = self.connect().await?;
@@ -228,7 +228,7 @@ impl VarlinkService {
         })
     }
 
-    /// `org.composefs.Repository.ImageObjects` via the typed proxy.
+    /// `io.cncf.composefs.Repository.ImageObjects` via the typed proxy.
     fn proxy_image_objects(
         &self,
         name: &str,
@@ -239,7 +239,7 @@ impl VarlinkService {
         })
     }
 
-    /// `org.composefs.Repository.InitRepository` via the typed proxy.
+    /// `io.cncf.composefs.Repository.InitRepository` via the typed proxy.
     fn proxy_init_repository(
         &self,
         path: &str,
@@ -252,7 +252,7 @@ impl VarlinkService {
         })
     }
 
-    /// `org.composefs.Oci.Pull` via the typed streaming proxy. Collects all
+    /// `io.cncf.composefs.Oci.Pull` via the typed streaming proxy. Collects all
     /// `PullProgress` frames into a `Vec`, surfacing the first error (transport
     /// or typed) encountered.
     fn proxy_pull(
@@ -340,7 +340,7 @@ fn test_varlink_fsck_empty_repo() -> Result<()> {
     let repo = repo_dir.path();
 
     let svc = VarlinkService::repository(repo)?;
-    let reply = svc.call("org.composefs.Repository.Fsck", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Repository.Fsck", json!({}))?;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["objects_checked"], 0);
     assert!(reply["errors"].as_array().unwrap().is_empty());
@@ -364,7 +364,7 @@ fn test_varlink_fsck_healthy_repo() -> Result<()> {
     .read()?;
 
     let svc = VarlinkService::repository(repo)?;
-    let reply = svc.call("org.composefs.Repository.Fsck", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Repository.Fsck", json!({}))?;
     assert_eq!(reply["ok"], true);
     assert!(reply["objects_checked"].as_u64().unwrap() > 0);
     assert_eq!(reply["objects_corrupted"], 0);
@@ -391,7 +391,7 @@ fn test_varlink_fsck_metadata_only() -> Result<()> {
     let svc = VarlinkService::repository(repo)?;
     // metadata_only skips per-object verification, so objects_checked stays 0.
     let reply = svc.call(
-        "org.composefs.Repository.Fsck",
+        "io.cncf.composefs.Repository.Fsck",
         json!({"metadata_only": true}),
     )?;
     assert_eq!(reply["ok"], true);
@@ -419,7 +419,7 @@ fn test_varlink_fsck_detects_corruption() -> Result<()> {
     corrupt_one_object(repo)?;
 
     let svc = VarlinkService::repository(repo)?;
-    let reply = svc.call("org.composefs.Repository.Fsck", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Repository.Fsck", json!({}))?;
     assert_eq!(reply["ok"], false);
     assert!(reply["objects_corrupted"].as_u64().unwrap() > 0);
     assert!(!reply["errors"].as_array().unwrap().is_empty());
@@ -435,7 +435,7 @@ fn test_varlink_oci_list_images_empty_repo() -> Result<()> {
     let repo = repo_dir.path();
 
     let svc = VarlinkService::oci(repo)?;
-    let reply = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     assert!(reply["images"].as_array().unwrap().is_empty());
 
     Ok(())
@@ -458,7 +458,7 @@ fn test_varlink_oci_list_images_after_pull() -> Result<()> {
     .run()?;
 
     let svc = VarlinkService::oci(repo)?;
-    let reply = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let images = reply["images"].as_array().unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["name"], "test-image");
@@ -489,10 +489,16 @@ fn test_varlink_oci_list_images_filter() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     // A non-matching filter yields nothing; a matching one yields the image.
-    let none = svc.call("org.composefs.Oci.ListImages", json!({"filter": "nope"}))?;
+    let none = svc.call(
+        "io.cncf.composefs.Oci.ListImages",
+        json!({"filter": "nope"}),
+    )?;
     assert!(none["images"].as_array().unwrap().is_empty());
 
-    let some = svc.call("org.composefs.Oci.ListImages", json!({"filter": "keep"}))?;
+    let some = svc.call(
+        "io.cncf.composefs.Oci.ListImages",
+        json!({"filter": "keep"}),
+    )?;
     assert_eq!(some["images"].as_array().unwrap().len(), 1);
 
     Ok(())
@@ -507,7 +513,7 @@ fn test_varlink_gc_empty_repo() -> Result<()> {
 
     let svc = VarlinkService::repository(repo)?;
     let reply = svc.call(
-        "org.composefs.Repository.Gc",
+        "io.cncf.composefs.Repository.Gc",
         json!({"dry_run": false, "roots": []}),
     )?;
     assert_eq!(reply["result"]["objects_removed"], 0);
@@ -534,13 +540,13 @@ fn test_varlink_gc_dry_run() -> Result<()> {
 
     let svc = VarlinkService::repository(repo)?;
     let reply = svc.call(
-        "org.composefs.Repository.Gc",
+        "io.cncf.composefs.Repository.Gc",
         json!({"dry_run": true, "roots": []}),
     )?;
     assert_eq!(reply["dry_run"], true);
 
     let objects = svc.call(
-        "org.composefs.Repository.ImageObjects",
+        "io.cncf.composefs.Repository.ImageObjects",
         json!({"name": "refs/my-image"}),
     )?;
     assert!(!objects["object_ids"].as_array().unwrap().is_empty());
@@ -565,7 +571,7 @@ fn test_varlink_image_objects() -> Result<()> {
 
     let svc = VarlinkService::repository(repo)?;
     let reply = svc.call(
-        "org.composefs.Repository.ImageObjects",
+        "io.cncf.composefs.Repository.ImageObjects",
         json!({"name": "refs/my-image"}),
     )?;
     let ids: Vec<&str> = reply["object_ids"]
@@ -623,7 +629,7 @@ fn test_varlink_oci_fsck_healthy() -> Result<()> {
     .run()?;
 
     let svc = VarlinkService::oci(repo)?;
-    let reply = svc.call("org.composefs.Oci.Check", json!({}))?;
+    let reply = svc.call("io.cncf.composefs.Oci.Check", json!({}))?;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["images_checked"], 1);
     assert_eq!(reply["images_corrupted"], 0);
@@ -650,7 +656,10 @@ fn test_varlink_oci_fsck_single_image() -> Result<()> {
     .run()?;
 
     let svc = VarlinkService::oci(repo)?;
-    let reply = svc.call("org.composefs.Oci.Check", json!({"image": "test-image"}))?;
+    let reply = svc.call(
+        "io.cncf.composefs.Oci.Check",
+        json!({"image": "test-image"}),
+    )?;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["images_checked"], 1);
     assert_eq!(reply["images_corrupted"], 0);
@@ -719,18 +728,18 @@ fn test_varlink_oci_tag_and_untag() -> Result<()> {
     .run()?;
 
     let svc = VarlinkService::oci(repo)?;
-    let list = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let list = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let images = list["images"].as_array().unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["name"], "myimage:v1");
     let manifest_digest = images[0]["manifest_digest"].as_str().unwrap().to_string();
 
     svc.call(
-        "org.composefs.Oci.Tag",
+        "io.cncf.composefs.Oci.Tag",
         json!({"manifest_digest": manifest_digest, "name": "myimage:latest"}),
     )?;
 
-    let list2 = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let list2 = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let mut names: Vec<String> = list2["images"]
         .as_array()
         .unwrap()
@@ -743,9 +752,9 @@ fn test_varlink_oci_tag_and_untag() -> Result<()> {
         vec!["myimage:latest".to_string(), "myimage:v1".to_string()]
     );
 
-    svc.call("org.composefs.Oci.Untag", json!({"name": "myimage:v1"}))?;
+    svc.call("io.cncf.composefs.Oci.Untag", json!({"name": "myimage:v1"}))?;
 
-    let list3 = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let list3 = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let images3 = list3["images"].as_array().unwrap();
     assert_eq!(images3.len(), 1);
     assert_eq!(images3[0]["name"], "myimage:latest");
@@ -771,7 +780,7 @@ fn test_varlink_oci_compute_id() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     let reply = svc.call(
-        "org.composefs.Oci.ComputeId",
+        "io.cncf.composefs.Oci.ComputeId",
         json!({"image": "test-ref-image", "verity": null, "bootable": false}),
     )?;
     let image_id = reply["image_id"].as_str().unwrap();
@@ -824,7 +833,7 @@ fn test_varlink_oci_pull_streaming() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     let frames = svc.call_more(
-        "org.composefs.Oci.Pull",
+        "io.cncf.composefs.Oci.Pull",
         json!({
             "image": format!("oci:{}", layout.display()),
             "name": "streamed-image",
@@ -856,7 +865,7 @@ fn test_varlink_oci_pull_streaming() -> Result<()> {
         assert_eq!(set, 1, "exactly one event variant must be set: {frame}");
     }
 
-    let list = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let list = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let images = list["images"].as_array().unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["name"], "streamed-image");
@@ -920,7 +929,7 @@ fn test_varlink_oci_pull_streaming_proxy() -> Result<()> {
     }
 
     // The image landed in the repo under the requested tag.
-    let list = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let list = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     let images = list["images"].as_array().unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0]["name"], "streamed-proxy");
@@ -941,7 +950,7 @@ fn test_varlink_oci_pull_then_inspect() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     let frames = svc.call_more(
-        "org.composefs.Oci.Pull",
+        "io.cncf.composefs.Oci.Pull",
         json!({
             "image": format!("oci:{}", layout.display()),
             "name": "inspectme",
@@ -952,7 +961,10 @@ fn test_varlink_oci_pull_then_inspect() -> Result<()> {
     )?;
     assert!(frames.last().unwrap()["completed"].is_object());
 
-    let reply = svc.call("org.composefs.Oci.Inspect", json!({"image": "inspectme"}))?;
+    let reply = svc.call(
+        "io.cncf.composefs.Oci.Inspect",
+        json!({"image": "inspectme"}),
+    )?;
     assert!(!reply["manifest"].as_str().unwrap().is_empty());
     assert!(!reply["config"].as_str().unwrap().is_empty());
     assert!(reply["composefs_boot_erofs"].is_null());
@@ -974,7 +986,7 @@ fn test_varlink_oci_pull_bad_image() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     let result = svc.call_more(
-        "org.composefs.Oci.Pull",
+        "io.cncf.composefs.Oci.Pull",
         json!({
             "image": "oci:/nonexistent/path/nope",
             "name": "x",
@@ -1011,7 +1023,7 @@ fn test_varlink_oci_pull_bootable() -> Result<()> {
 
     let svc = VarlinkService::oci(repo)?;
     let result = svc.call_more(
-        "org.composefs.Oci.Pull",
+        "io.cncf.composefs.Oci.Pull",
         json!({
             "image": format!("oci:{}", layout.display()),
             "name": "bootme",
@@ -1043,7 +1055,7 @@ fn test_varlink_oci_pull_bootable() -> Result<()> {
 }
 integration_test!(test_varlink_oci_pull_bootable);
 
-/// Both the `org.composefs.Repository` and `org.composefs.Oci` interfaces are
+/// Both the `io.cncf.composefs.Repository` and `io.cncf.composefs.Oci` interfaces are
 /// served on the same socket by a single service process.
 fn test_varlink_both_interfaces_one_socket() -> Result<()> {
     let sh = Shell::new()?;
@@ -1055,13 +1067,13 @@ fn test_varlink_both_interfaces_one_socket() -> Result<()> {
 
     // A Repository-interface method...
     let fsck = svc.call(
-        "org.composefs.Repository.Fsck",
+        "io.cncf.composefs.Repository.Fsck",
         json!({"metadata_only": true}),
     )?;
     assert_eq!(fsck["ok"], true);
 
     // ...and an Oci-interface method, on the very same socket.
-    let images = svc.call("org.composefs.Oci.ListImages", json!({}))?;
+    let images = svc.call("io.cncf.composefs.Oci.ListImages", json!({}))?;
     assert!(images["images"].as_array().unwrap().is_empty());
 
     Ok(())
@@ -1099,7 +1111,7 @@ fn test_varlink_socket_activation() -> Result<()> {
             "--json=short",
             "call",
             &reference,
-            "org.composefs.Repository.OpenRepository",
+            "io.cncf.composefs.Repository.OpenRepository",
             &params,
         ])
         .output()
@@ -1142,7 +1154,7 @@ fn test_varlink_open_and_close_repository() -> Result<()> {
 
     // Open a second handle to the same repo.
     let open_reply = svc.call_raw(
-        "org.composefs.Repository.OpenRepository",
+        "io.cncf.composefs.Repository.OpenRepository",
         json!({"path": repo.to_str().unwrap()}),
     )?;
     let new_handle = open_reply["handle"]
@@ -1152,20 +1164,20 @@ fn test_varlink_open_and_close_repository() -> Result<()> {
 
     // The new handle works.
     let fsck = svc.call_raw(
-        "org.composefs.Repository.Fsck",
+        "io.cncf.composefs.Repository.Fsck",
         json!({"handle": new_handle}),
     )?;
     assert_eq!(fsck["ok"], true);
 
     // Close the handle.
     svc.call_raw(
-        "org.composefs.Repository.CloseRepository",
+        "io.cncf.composefs.Repository.CloseRepository",
         json!({"handle": new_handle}),
     )?;
 
     // After closing, the handle is no longer valid.
     let err = svc.call_expect_err(
-        "org.composefs.Repository.Fsck",
+        "io.cncf.composefs.Repository.Fsck",
         json!({"handle": new_handle}),
     )?;
     assert!(
@@ -1187,7 +1199,7 @@ fn test_varlink_open_repository_invalid_spec() -> Result<()> {
     let svc = VarlinkService::repository(repo)?;
 
     // No selector field at all.
-    let err = svc.call_expect_err("org.composefs.Repository.OpenRepository", json!({}))?;
+    let err = svc.call_expect_err("io.cncf.composefs.Repository.OpenRepository", json!({}))?;
     assert!(
         err.contains("InvalidSpec"),
         "expected InvalidSpec for empty params, got: {err}"
@@ -1195,7 +1207,7 @@ fn test_varlink_open_repository_invalid_spec() -> Result<()> {
 
     // Two selector fields simultaneously.
     let err2 = svc.call_expect_err(
-        "org.composefs.Repository.OpenRepository",
+        "io.cncf.composefs.Repository.OpenRepository",
         json!({"path": repo.to_str().unwrap(), "user": true}),
     )?;
     assert!(
@@ -1218,14 +1230,14 @@ fn test_varlink_invalid_handle() -> Result<()> {
     let svc = VarlinkService::repository(repo)?;
 
     // Repository method with bogus handle.
-    let err = svc.call_expect_err("org.composefs.Repository.Fsck", json!({"handle": 999}))?;
+    let err = svc.call_expect_err("io.cncf.composefs.Repository.Fsck", json!({"handle": 999}))?;
     assert!(
         err.contains("InvalidHandle"),
         "expected InvalidHandle from Fsck, got: {err}"
     );
 
-    // OCI method with bogus handle (org.composefs.Oci.InvalidHandle).
-    let err2 = svc.call_expect_err("org.composefs.Oci.ListImages", json!({"handle": 999}))?;
+    // OCI method with bogus handle (io.cncf.composefs.Oci.InvalidHandle).
+    let err2 = svc.call_expect_err("io.cncf.composefs.Oci.ListImages", json!({"handle": 999}))?;
     assert!(
         err2.contains("InvalidHandle"),
         "expected InvalidHandle from Oci.ListImages, got: {err2}"
@@ -1244,7 +1256,7 @@ fn test_varlink_close_unknown_handle() -> Result<()> {
 
     let svc = VarlinkService::repository(repo)?;
     let err = svc.call_expect_err(
-        "org.composefs.Repository.CloseRepository",
+        "io.cncf.composefs.Repository.CloseRepository",
         json!({"handle": 424242}),
     )?;
     assert!(
@@ -1275,7 +1287,7 @@ fn test_varlink_init_repository_creates_new() -> Result<()> {
     let path_str = new_repo_path.to_str().context("repo path not UTF-8")?;
 
     let reply = svc.call_raw(
-        "org.composefs.Repository.InitRepository",
+        "io.cncf.composefs.Repository.InitRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert_eq!(
@@ -1285,7 +1297,7 @@ fn test_varlink_init_repository_creates_new() -> Result<()> {
 
     // The new repo should be openable.
     let open_reply = svc.call_raw(
-        "org.composefs.Repository.OpenRepository",
+        "io.cncf.composefs.Repository.OpenRepository",
         json!({"path": path_str}),
     )?;
     assert!(
@@ -1311,14 +1323,14 @@ fn test_varlink_init_repository_idempotent() -> Result<()> {
 
     // First call: creates the repo.
     let first = svc.call_raw(
-        "org.composefs.Repository.InitRepository",
+        "io.cncf.composefs.Repository.InitRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert_eq!(first["created"], true, "first call should create the repo");
 
     // Second call with the same algorithm: idempotent.
     let second = svc.call_raw(
-        "org.composefs.Repository.InitRepository",
+        "io.cncf.composefs.Repository.InitRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert_eq!(
@@ -1346,7 +1358,7 @@ fn test_varlink_init_repository_invalid_algorithm() -> Result<()> {
         .to_owned();
 
     let err = svc.call_expect_err(
-        "org.composefs.Repository.InitRepository",
+        "io.cncf.composefs.Repository.InitRepository",
         json!({"path": path_str, "algorithm": "not-an-algorithm"}),
     )?;
     assert!(
@@ -1430,7 +1442,7 @@ fn test_varlink_ensure_repository_creates_new() -> Result<()> {
     let path_str = new_repo_path.to_str().context("repo path not UTF-8")?;
 
     let reply = svc.call_raw(
-        "org.composefs.Repository.EnsureRepository",
+        "io.cncf.composefs.Repository.EnsureRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert_eq!(
@@ -1467,7 +1479,7 @@ fn test_varlink_ensure_repository_preserves_existing_format() -> Result<()> {
     let path_str = target.to_str().context("repo path not UTF-8")?;
 
     let reply = svc.call_raw(
-        "org.composefs.Repository.EnsureRepository",
+        "io.cncf.composefs.Repository.EnsureRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert_eq!(
@@ -1505,7 +1517,7 @@ fn test_varlink_init_repository_still_bails_on_config_mismatch() -> Result<()> {
     let path_str = target.to_str().context("repo path not UTF-8")?;
 
     let err = svc.call_expect_err(
-        "org.composefs.Repository.InitRepository",
+        "io.cncf.composefs.Repository.InitRepository",
         json!({"path": path_str, "insecure": true}),
     )?;
     assert!(

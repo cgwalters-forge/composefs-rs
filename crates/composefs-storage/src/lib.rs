@@ -59,7 +59,7 @@ pub mod lock;
 pub mod storage;
 pub mod tar_split;
 
-// Stateless CstorLayerService implementing org.composefs.Oci
+// Stateless CstorLayerService implementing io.cncf.composefs.OciTransfer
 #[cfg(feature = "layer-transfer")]
 pub mod cstor_service;
 
