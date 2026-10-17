@@ -734,6 +734,9 @@ impl Filesystem for ComposefsFuse {
             }
         };
 
+        // Like the other `handles` locks below: the mutex is only poisoned if
+        // a previous holder panicked. Propagate that panic rather than recover
+        // potentially inconsistent handle state or report a per-request error.
         let mut state = self.handles.lock().expect("fuse handles mutex poisoned");
         let fh = state.next_fh;
         state.next_fh += 1;
