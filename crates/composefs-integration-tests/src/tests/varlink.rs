@@ -273,6 +273,7 @@ impl VarlinkService {
                     bootable,
                     None,
                     None,
+                    None,
                 )
                 .await?;
             zlink::futures_util::pin_mut!(stream);
