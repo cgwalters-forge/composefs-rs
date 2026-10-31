@@ -19,9 +19,10 @@ dnf -y install cargo rust gcc git make openssl-devel pkgconf-pkg-config \
 git config --global --add safe.directory "$src"
 cd "$src"
 
-# Plain `cargo vendor` with the distribution's cargo, rather than
-# installing cargo-vendor-filterer as the release workflow does.
-PACK_VENDOR=cargo contrib/packaging/pack.sh
+# Install the same vendoring tool used by Packit and the release workflow.
+cargo install --locked cargo-vendor-filterer
+export PATH="${HOME}/.cargo/bin:${PATH}"
+contrib/packaging/pack.sh
 
 # Man pages need pandoc, and %autochangelog rpmautospec, neither of
 # which CentOS Stream ships; the changelog doesn't matter here, and

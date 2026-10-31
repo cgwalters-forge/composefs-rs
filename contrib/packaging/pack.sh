@@ -38,23 +38,8 @@ git archive --format=tar --prefix="${PREFIX}" -o "${TAR}" HEAD
 TMPDIR=$(mktemp -d -p target)
 trap 'rm -rf "${TMPDIR}"' EXIT
 
-# Vendor tarball via cargo-vendor-filterer, or with PACK_VENDOR=cargo via
-# plain `cargo vendor` (larger, as it keeps all platforms, but needs no
-# extra tools).
-case "${PACK_VENDOR:-filterer}" in
-    filterer)
-        VENDOR_CONFIG=$(cargo vendor-filterer --prefix=vendor --format=tar.zstd "${VENDORTAR}")
-        ;;
-    cargo)
-        VENDOR_CONFIG=$(cargo vendor "${TMPDIR}/vendor")
-        tar -C "${TMPDIR}" --zstd -cf "${VENDORTAR}" vendor
-        rm -rf "${TMPDIR}/vendor"
-        ;;
-    *)
-        echo "error: unknown PACK_VENDOR=${PACK_VENDOR}" >&2
-        exit 1
-        ;;
-esac
+# Vendor tarball via cargo-vendor-filterer
+VENDOR_CONFIG=$(cargo vendor-filterer --prefix=vendor --format=tar.zstd "${VENDORTAR}")
 
 if test -z "${VENDOR_CONFIG}"; then
     echo "error: vendoring printed no source replacement config" >&2
