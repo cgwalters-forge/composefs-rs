@@ -119,6 +119,9 @@ impl std::fmt::Debug for IndicatifReporter {
 #[cfg(any(feature = "oci", feature = "http", feature = "ostree"))]
 impl ProgressReporter for IndicatifReporter {
     fn report(&self, event: ProgressEvent) {
+        // The `bars.lock().unwrap()` calls below can only fail if a previous
+        // holder panicked while holding the lock; `report()` has no way to
+        // return an error, so propagating that panic is the intended outcome.
         match event {
             ProgressEvent::Started { id, total, unit } => {
                 let bar = if let Some(total) = total {
