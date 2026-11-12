@@ -2473,8 +2473,9 @@ where
             let out = dump_files(&repo, &image_name, &files, backing_path_only)?;
 
             if !out.is_empty() {
-                let out_str = std::str::from_utf8(&out).unwrap();
-                print!("{}", out_str);
+                std::io::stdout()
+                    .write_all(&out)
+                    .context("Writing dump-files output to stdout")?;
             }
         }
         Command::Fsck {
